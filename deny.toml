@@ -29,7 +29,16 @@ no-default-features = false
 [advisories]
 version = 2
 yanked = "deny"
-ignore = []
+ignore = [
+    # RUSTSEC-2024-0449 — unsafe-libyaml is unmaintained.
+    # Pulled transitively via serde_yaml_ng 0.10 (latest), which every
+    # maintained Rust YAML crate currently depends on. No known
+    # vulnerability — the advisory is an "unmaintained" marker.
+    # XTR only parses operator-controlled YAML (xtr.yaml + .soap.yaml
+    # sidecars) at boot, never untrusted input. Mirrored in
+    # .cargo/audit.toml. Review: 2027-04-14.
+    "RUSTSEC-2024-0449",
+]
 
 # -----------------------------------------------------------------
 # Licenses — allow-list. Anything not listed here fails the build.
