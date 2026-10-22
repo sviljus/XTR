@@ -1014,6 +1014,7 @@ domain functionality yet. Every rule from Ruuter-on-Rust's
   first task on the roadmap: analyse the original
   `buerokratt/XTR` and define XTR-on-Rust's domain surface.
 
+[Unreleased]: https://github.com/turnerrainer/XTR/compare/v0.5.0-rc...HEAD
 [0.5.0-rc]: https://github.com/turnerrainer/XTR/compare/v0.4.3-rc...v0.5.0-rc
 [0.4.3-rc]: https://github.com/turnerrainer/XTR/compare/v0.4.2-rc...v0.4.3-rc
 [0.4.2-rc]: https://github.com/turnerrainer/XTR/compare/v0.4.1-rc...v0.4.2-rc
