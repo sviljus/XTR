@@ -465,6 +465,29 @@ fn prepare(root: &Path, sidecar: &Path, cfg: &AppConfig) -> Result<XmlService, S
         );
     }
 
+    // Directions must match the sections the sidecar has.
+    let any_in = messages.values().any(|m| m.cfg.direction.inbound());
+    let any_out = messages.values().any(|m| m.cfg.direction.outbound());
+    for (m, msg) in &messages {
+        let d = msg.cfg.direction;
+        if d.inbound() && !d.outbound() && sc.inbound.is_none() {
+            return Err(format!(
+                "message {m} is `direction: in` but the sidecar has no `inbound:`"
+            ));
+        }
+        if d.outbound() && !d.inbound() && sc.outbound.is_none() {
+            return Err(format!(
+                "message {m} is `direction: out` but the sidecar has no `outbound:`"
+            ));
+        }
+    }
+    if sc.inbound.is_some() && !any_in {
+        return Err("`inbound:` is set but every message is `direction: out`".into());
+    }
+    if sc.outbound.is_some() && !any_out {
+        return Err("`outbound:` is set but every message is `direction: in`".into());
+    }
+
     // Inbound checks.
     if let Some(ib) = &sc.inbound {
         if !(200..300).contains(&ib.success_status) {

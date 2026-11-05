@@ -71,7 +71,9 @@ Boot is refused (with the full list) for: a missing/unparsable XSD, a
 prefix (or that would shadow a DSL endpoint `/:group/:service`), a
 non-2xx `success_status`, a `relay_statuses` entry that is not 4xx, a
 `backend`/`forward` on a `direction: out` message (or `url`/`timeout_secs`
-on a `direction: in` one), a message name that is a global element in
+on a `direction: in` one), a message whose `direction` needs an
+`inbound:` / `outbound:` section the sidecar does not have (or a section no
+message can use), a message name that is a global element in
 several namespaces, a `schemas:` entry with a path separator, an invalid
 `outbound.content_type`, an out-of-range `timeout_secs`, and
 peer URLs rejected by the same SSRF guard as WSDL-declared URLs
@@ -119,8 +121,14 @@ peer URLs rejected by the same SSRF guard as WSDL-declared URLs
 
 `messages.X.forward: <url>` makes XTR POST the **received bytes
 unchanged** (same `Content-Type`) to `<url>` and relay its status and
-body to the peer (a 5xx, an unreadable or oversized answer becomes a plain
-502 `forward_error`; the details only reach the log). Nothing is decoded
+body to the peer. Only 2xx answers and the 4xx codes listed in
+`inbound.relay_statuses` (default 400, 409, 422) are relayed; any other
+status (3xx, 5xx, and e.g. 401/404, which usually mean a wrong target URL
+or credentials rather than a verdict on the message) becomes a plain
+502 `forward_error`, as does an unreachable target; the details only reach
+the log. A relayed answer whose body is unreadable or over the response
+limit is relayed with an empty body (status kept, warning logged).
+While `XTR_OFFLINE` is set the forward is blocked too (503 `offline`). Nothing is decoded
 or stored. The target URL is checked for scheme only (like backend URLs);
 the forward client has no client certificate — front the target with an
 internal hop if it needs mTLS. Use it to move one
