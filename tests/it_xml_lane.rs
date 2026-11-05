@@ -531,6 +531,40 @@ async fn forward_hides_target_5xx_and_relays_target_4xx() {
 }
 
 #[tokio::test]
+async fn forward_does_not_relay_404_and_401_by_default() {
+    let (backend, _s) = spawn_backend().await;
+    for code in [404u16, 401] {
+        let (peer, _) = spawn_peer(code, "<E/>").await;
+        let env = build(&format!(
+            "schemas: [Msg.xsd]\nmessages:\n  Notify_Request:\n    forward: {peer}\ninbound:\n  backend: {backend}\n"
+        ));
+        let (st, body, _) = call(&env.app, xml_post("/xml-in/erru/msg", NOTIFY_XML)).await;
+        assert_eq!(st, StatusCode::BAD_GATEWAY, "forward {code}");
+        assert!(!body.contains("<E/>"));
+    }
+}
+
+#[tokio::test]
+async fn forward_success_with_over_limit_body_is_still_a_success() {
+    let (backend, _s) = spawn_backend().await;
+    let big: &'static str = Box::leak("x".repeat(500).into_boxed_str());
+    let (peer, _) = spawn_peer(202, big).await;
+    let dir = format!(
+        "schemas: [Msg.xsd]\nmessages:\n  Notify_Request:\n    forward: {peer}\ninbound:\n  backend: {backend}\n"
+    );
+    let env = build_opts(
+        &dir,
+        Opts {
+            max_response_bytes: Some(100),
+            ..Default::default()
+        },
+    );
+    let (st, body, _) = call(&env.app, xml_post("/xml-in/erru/msg", NOTIFY_XML)).await;
+    assert_eq!(st, StatusCode::ACCEPTED);
+    assert!(body.len() <= 100, "oversized body must be dropped");
+}
+
+#[tokio::test]
 async fn forward_without_content_type_defaults_to_application_xml() {
     let (backend, _s) = spawn_backend().await;
     let (old, raw) = spawn_peer(202, "").await;
@@ -736,6 +770,9 @@ fn more_bad_sidecars_refuse_boot() {
         ("schemas: [Msg.xsd]\nmessages: {Notify_Request: {direction: out, backend: 'http://b'}}\ninbound: {backend: 'http://b'}\n", "direction: out"),
         ("schemas: [Msg.xsd]\nmessages: {Notify_Request: {direction: in, timeout_secs: 3}}\ninbound: {backend: 'http://b'}\noutbound: {url: 'http://localhost:1/x'}\n", "direction: in"),
         ("schemas: [Msg.xsd]\nmessages: {Notify_Request: {url: 'http://localhost:1/x'}}\ninbound: {backend: 'http://b'}\n", "need an `outbound:`"),
+        // direction vs sections
+        ("schemas: [Msg.xsd]\nmessages: {Notify_Request: {direction: in}}\noutbound: {url: 'http://localhost:1/x'}\n", "no `inbound:`"),
+        ("schemas: [Msg.xsd]\nmessages: {Notify_Request: {direction: out}}\ninbound: {backend: 'http://b'}\n", "no `outbound:`"),
         // SSRF guard on peer URLs
         ("schemas: [Msg.xsd]\nmessages: {Notify_Request: {}}\noutbound: {url: 'http://127.0.0.1:9/x'}\n", "Notify_Request"),
         ("schemas: [Msg.xsd]\nmessages: {Notify_Request: {}}\noutbound: {url: 'http://not-allowlisted.example/x'}\n", "Notify_Request"),
