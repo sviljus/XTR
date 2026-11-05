@@ -122,7 +122,7 @@ async fn post_canonical(
 /// flagged. The caller already holds the status — losing it to a body
 /// problem would make it retry a message the peer did accept.
 /// Returns `(text, truncated, read_failed)`.
-async fn read_capped(mut resp: reqwest::Response, limit: usize) -> (String, bool, bool) {
+async fn read_capped(mut resp: reqwest::Response, limit: usize) -> (Vec<u8>, bool, bool) {
     let mut buf: Vec<u8> = Vec::new();
     let (mut truncated, mut failed) = (false, false);
     loop {
@@ -143,11 +143,11 @@ async fn read_capped(mut resp: reqwest::Response, limit: usize) -> (String, bool
             }
         }
     }
-    (
-        String::from_utf8_lossy(&buf).into_owned(),
-        truncated,
-        failed,
-    )
+    (buf, truncated, failed)
+}
+
+fn lossy(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).into_owned()
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -208,7 +208,7 @@ async fn handle_inbound(
         );
     };
     if let Some(target) = msg.cfg.forward.as_deref() {
-        return forward_raw(st, target, &root.local, headers, body).await;
+        return forward_raw(st, target, &root.local, headers, body, &ib.relay_statuses).await;
     }
     let Some(url) = svc.backend_for(&root.local) else {
         return err(
@@ -275,7 +275,8 @@ async fn handle_inbound(
         let code = StatusCode::from_u16(ib.success_status).unwrap_or(StatusCode::ACCEPTED);
         return code.into_response();
     }
-    let (text, _, _) = read_capped(resp, st.cfg.limits.max_response_bytes).await;
+    let (bytes, _, _) = read_capped(resp, st.cfg.limits.max_response_bytes).await;
+    let text = lossy(&bytes);
     if ib.relay_statuses.contains(&status.as_u16()) {
         // The backend decides the peer-visible status (400/409/422 …).
         let mut r = (status, text).into_response();
@@ -382,18 +383,19 @@ async fn call_outbound(
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .map(String::from);
-    let (text, truncated, read_failed) = read_capped(resp, st.cfg.limits.max_response_bytes).await;
+    let (bytes, truncated, read_failed) = read_capped(resp, st.cfg.limits.max_response_bytes).await;
+    let text = lossy(&bytes);
     // Decode the reply when it is one of our messages; anything else
     // (an empty 202, an HTML error page) is returned as plain `body`.
     let decoded = (!truncated && !read_failed)
         .then(|| dom::parse(&text).ok())
         .flatten()
         .and_then(|root| {
-            let q = svc
-                .schema
-                .global_by_local(&root.local)
-                .map(|(q, _)| q.clone())
-                .filter(|q| q.ns == root.ns)?;
+            let q = crate::inbound::contract::QName {
+                ns: root.ns.clone(),
+                local: root.local.clone(),
+            };
+            svc.schema.element(&q)?;
             let ty = svc.schema.element(&q).and_then(|t| svc.schema.resolve(t));
             Some(json!({
                 "message": root.local,
@@ -419,6 +421,7 @@ async fn forward_raw(
     message: &str,
     headers: &HeaderMap,
     body: &[u8],
+    relay_statuses: &[u16],
 ) -> Response {
     if st.offline {
         return err(
@@ -461,17 +464,25 @@ async fn forward_raw(
     };
     let status = resp.status();
     let ct = resp.headers().get(header::CONTENT_TYPE).cloned();
-    let (text, truncated, failed) = read_capped(resp, st.cfg.limits.max_response_bytes).await;
-    if status.is_server_error() || truncated || failed {
-        // Same rule as the backend path: the target's internals (stack
-        // traces, hostnames) stay in the log, the peer gets a plain 502.
-        tracing::warn!(message = ?message, status = status.as_u16(), truncated, failed, "forward target failed");
+    let (bytes, truncated, failed) = read_capped(resp, st.cfg.limits.max_response_bytes).await;
+    // Success is relayed whatever the body looks like (the target accepted
+    // the message; a 502 would make the peer resend it). A 4xx is relayed
+    // only when it is a verdict on the message (`relay_statuses`); 3xx, 5xx
+    // and other 4xx are infrastructure faults: details stay in the log.
+    if !(status.is_success() || relay_statuses.contains(&status.as_u16())) {
+        tracing::warn!(message = ?message, status = status.as_u16(), "forward target failed");
         return err(
             StatusCode::BAD_GATEWAY,
             "forward_error",
             "forward target failed",
         );
     }
+    let text = if truncated || failed {
+        tracing::warn!(message = ?message, status = status.as_u16(), truncated, failed, "forward target body dropped");
+        Vec::new()
+    } else {
+        bytes
+    };
     let mut r = (status, text).into_response();
     if let Some(ct) = ct {
         r.headers_mut().insert(header::CONTENT_TYPE, ct);
