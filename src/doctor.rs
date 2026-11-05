@@ -147,7 +147,11 @@ fn check_soap_lanes_exposure(cfg: &AppConfig, out: &mut Vec<Finding>) {
             ),
         });
     }
-    let sum = check.summary;
+    let xml = crate::xmllane::count_lanes(dir.as_deref());
+    let sum = crate::inbound::LaneSummary {
+        inbound: check.summary.inbound + xml.inbound,
+        outbound: check.summary.outbound + xml.outbound,
+    };
     if sum.inbound == 0 {
         return;
     }
