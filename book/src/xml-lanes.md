@@ -1,0 +1,168 @@
+# Raw-XML lanes (no SOAP envelope)
+
+Some peers exchange bare XML documents over plain HTTP(S) — no SOAP
+envelope, no WSDL. A typical example is the EU ERRU MOVEHUB
+`BTSHTTPReceive` interface. The [SOAP lanes](./soap-lanes.md) cannot
+talk to such a peer: they always wrap the payload in a SOAP 1.1 envelope
+and need a WSDL.
+
+The raw-XML lanes reuse the SOAP lanes' XSD-guided XML ⇄ JSON codec but
+put the **document itself** on the wire. They are opt-in per contract
+through a sidecar `<name>.xml.yaml` next to the XSD files and do nothing
+without one.
+
+| Direction | Who calls whom | Endpoint |
+|---|---|---|
+| **inbound** | the peer POSTs raw XML to XTR; XTR POSTs JSON to your backend | `POST /xml-in/<group>/<name>` (and an optional alias, see `inbound.path`) |
+| **outbound** | your service POSTs JSON to XTR; XTR POSTs raw XML to the peer | `POST /xml-out/<group>/<name>/<message>` |
+
+As with the SOAP lanes the prefixes differ on purpose: `/xml-in/` is for
+the peer network, `/xml-out/` makes XTR act with its own identity and is
+covered by `XTR_INTER_SERVICE_TOKEN` — never expose it to the peer
+network. The same exposure rule applies: when inbound and outbound share
+one listener, set `inbound.port` or `XTR_INTER_SERVICE_TOKEN`.
+
+> **XTR stays stateless.** There is no queue, retry, outbox or deadline
+> handling. XTR hands the backend the received bytes and their SHA-256
+> digest; replay detection, persistence and retries are the backend's /
+> caller's job.
+
+## Layout and sidecar
+
+```text
+wsdl/<group>/<name>.xml.yaml     # the sidecar (<group> subdirectory is required)
+wsdl/<group>/*.xsd               # entry XSDs + local includes/imports
+```
+
+`<group>/<name>` become the endpoint names. Nested directories are joined
+with `-`, like the SOAP lanes.
+
+```yaml
+schemas: [NotifyUnfitness_Request.xsd, NotifyUnfitness_Acknowledgement.xsd]
+
+# Message types this contract carries = global element names in the XSDs.
+# Anything else is refused. `Name: {}` is enough.
+messages:
+  NotifyUnfitness_Request:
+    direction: both          # in | out | both (default); a one-way message should say so
+  NotifyUnfitness_Acknowledgement:
+    forward: http://old-system:8080/xml       # inbound only, see "Staged migration"
+
+inbound:
+  backend: http://ruuter-internal:8080/ljvis/erru/xml-in   # POST <backend>/<Message>
+  success_status: 202        # status returned to the peer on a 2xx backend answer (default 202)
+  include_raw: true          # also send `rawXml` to the backend (default true)
+  relay_statuses: [400, 409, 422]   # backend 4xx codes handed to the peer as they are (default)
+  path: /erru/xml            # optional extra route serving this lane
+
+outbound:
+  url: https://peer.example/http/request/BTSHTTPReceive.dll   # per message: messages.X.url
+  timeout_secs: 15           # 1..=limits.request_timeout_secs; per message: messages.X.timeout_secs
+  keystore_path: /app/ssl/own.p12          # optional client certificate (PKCS#12)
+  keystore_password_env: XTR_OUTBOUND_KEYSTORE_PASSWORD
+  trust_ca_path: /app/ssl/peer-ca.pem      # optional
+  content_type: application/xml; charset=utf-8
+```
+
+Boot is refused (with the full list) for: a missing/unparsable XSD, a
+`messages` entry that is not a global element, a lane without
+`inbound`/`outbound`, a message without backend or peer URL, an
+`inbound.path` that is not a literal absolute path or uses a reserved
+prefix (or that would shadow a DSL endpoint `/:group/:service`), a
+non-2xx `success_status`, a `relay_statuses` entry that is not 4xx, a
+`backend`/`forward` on a `direction: out` message (or `url`/`timeout_secs`
+on a `direction: in` one), a message name that is a global element in
+several namespaces, a `schemas:` entry with a path separator, an invalid
+`outbound.content_type`, an out-of-range `timeout_secs`, and
+peer URLs rejected by the same SSRF guard as WSDL-declared URLs
+(`wsdl.allow_http_upstream`, `wsdl.upstream_host_allowlist`).
+
+## Inbound
+
+1. The body must be UTF-8 XML within `limits.max_request_bytes`
+   (413 otherwise). `DOCTYPE`/DTD is rejected (400) — no XXE or entity
+   expansion.
+2. The root element (local name **and** namespace) must be one of
+   the `messages` that can arrive (`direction: in` or `both`),
+   otherwise 400 `unsupported_message`.
+3. XTR decodes the document to JSON with the XSD as a hint (see
+   [codec conventions](./soap-lanes.md): `@attr` keys, arrays for
+   repeated elements, text never coerced).
+4. XTR POSTs to the backend:
+
+   ```json
+   {
+     "service": "erru/erru",
+     "message": "NotifyUnfitness_Request",
+     "request": { "Header": { "@technicalId": "…" }, "Body": { … } },
+     "sha256": "9f2c…",          // SHA-256 (hex) of the exact bytes received
+     "rawXml": "<?xml …"         // omitted when include_raw: false
+   }
+   ```
+
+   plus headers `x-xtr-inbound-service`, `x-xtr-message` and the
+   incoming `traceparent`.
+5. The backend decides the answer the peer sees:
+
+   | Backend | Peer gets |
+   |---|---|
+   | 2xx | `success_status` (default 202), empty body |
+   | 4xx listed in `relay_statuses` (default 400, 409, 422) | the same status and the backend's body, always sent as `Content-Type: application/json` |
+   | any other 4xx (wrong backend path 404, gateway guard 401/403 …) | 502 `backend_error` — an infrastructure fault is not a verdict on the message, so the peer retries |
+   | 5xx / unreachable / timeout | 502 / 502 / 504, no backend details |
+   | `XTR_OFFLINE` | 503 `offline` |
+
+   A peer that retries a failed delivery meets the backend's own
+   idempotency (`sha256` + the message ids in `request`).
+
+### Staged migration: `forward`
+
+`messages.X.forward: <url>` makes XTR POST the **received bytes
+unchanged** (same `Content-Type`) to `<url>` and relay its status and
+body to the peer (a 5xx, an unreadable or oversized answer becomes a plain
+502 `forward_error`; the details only reach the log). Nothing is decoded
+or stored. The target URL is checked for scheme only (like backend URLs);
+the forward client has no client certificate — front the target with an
+internal hop if it needs mTLS. Use it to move one
+message type at a time from an old receiver to a new backend: list every
+message type, give the ones still served by the old system a `forward`,
+and the rest a backend. `forward` and `backend` are mutually exclusive
+per message.
+
+## Outbound
+
+`POST /xml-out/<group>/<name>/<message>` with a JSON object — the content
+of the message's root element, same conventions as the inbound `request`.
+XTR encodes it (child order follows the XSD; `null` omits), prepends the
+XML declaration and POSTs it to the peer with `Content-Type:
+application/xml; charset=utf-8` and the per-message timeout.
+
+The **upstream answer is data, not an error**: XTR returns HTTP 200 with
+
+```json
+{
+  "status": 202,                 // the peer's HTTP status, whatever it is
+  "contentType": "application/xml",
+  "body": "<…raw reply…>",       // raw text; invalid UTF-8 is replaced, cut at limits.max_response_bytes
+  "bodyTruncated": false,        // true when the reply was longer than the limit
+  "bodyReadFailed": false,       // true when the connection broke while reading the body
+  "response": { "message": "NotifyUnfitness_Acknowledgement", "content": { … } }
+}
+```
+
+`response` is `null` unless the reply is complete and its root is a
+global element of the lane's schemas. A
+caller that must tell "the peer said no" (a status) from "we do not know
+what happened" (timeout, connection loss) can: transport failures use
+an error body — `upstream_timeout` 504, `upstream_unreachable` 502 (no
+URL in the response, it is logged). Once the peer has answered, its
+status is always returned, whatever the body looks like.
+
+## Not covered
+
+* **XSD validation.** The schema is a codec hint (order, repetition,
+  namespaces). Required elements, enumerations and facets are **not**
+  checked; validate in the backend/caller if the peer requires it.
+* Sync replies in the response body, SOAP, WS-Security, retries, queues.
+* `xtr doctor` only counts `.xml.yaml` lanes for the shared-listener
+  exposure check; sidecar contents are validated at boot.
