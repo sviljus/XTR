@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Raw-XML inbound refuses an XML declaration whose `encoding` is not UTF-8
+  (HTTP 400 `unsupported_encoding`), also before `forward`. Docs: the `sha256`
+  digest is for integrity and audit, not for duplicate detection.
 - **Raw-XML lanes** (`<name>.xml.yaml` sidecar next to XSD files, no WSDL,
   no SOAP envelope) for peers that exchange bare XML over HTTP(S), e.g.
   the EU ERRU MOVEHUB. Inbound `POST /xml-in/<group>/<name>` (optional
