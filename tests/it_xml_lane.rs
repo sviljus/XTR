@@ -940,7 +940,7 @@ fn inbound_path_rejects_bare_lane_prefixes() {
         let e = load_err(&format!(
             "schemas: [Msg.xsd]\nmessages: {{Notify_Request: {{}}}}\ninbound: {{backend: 'http://b', path: {p}}}\n"
         ));
-        assert!(e.contains("inbound.path"), "{p}: {e}");
+        assert!(e.contains("reserved prefix"), "{p}: {e}");
     }
 }
 
@@ -986,7 +986,7 @@ async fn forward_to_own_inbound_is_refused_as_a_loop() {
         },
     ));
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
     let resp = client
         .post(format!("http://127.0.0.1:{port}/xml-in/erru/msg"))
         .header("content-type", "application/xml")
@@ -1002,4 +1002,17 @@ async fn forward_to_own_inbound_is_refused_as_a_loop() {
         2,
         "loop must stop after one hop"
     );
+}
+
+#[tokio::test]
+async fn forwarded_header_on_a_backend_message_is_accepted() {
+    // A chain XTR A -> XTR B works when B sends the message to its backend.
+    let (backend, seen) = spawn_backend().await;
+    let env = build(&inbound_sidecar(&backend));
+    let mut req = xml_post("/xml-in/erru/msg", NOTIFY_XML);
+    req.headers_mut()
+        .insert("x-xtr-forwarded", "1".parse().unwrap());
+    let (st, body, _) = call(&env.app, req).await;
+    assert_eq!(st, StatusCode::ACCEPTED, "{body}");
+    assert_eq!(seen.lock().unwrap().len(), 1);
 }

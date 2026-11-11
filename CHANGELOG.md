@@ -23,8 +23,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `inbound.relay_statuses` (default 400/409/422), `messages.X.direction`
   (`in`/`out`/`both`) scopes a message to one side. A `forward` loop
   guard (`x-xtr-forwarded` request header) makes XTR answer 508
-  `loop_detected` when a forwarded message comes back to an inbound
-  route. `/xml-in` and `/xml-out` are reserved paths, also without a
+  `loop_detected` when a message that arrives with this header must be
+  forwarded again. A forwarded message that goes to a backend is
+  accepted. `/xml-in` and `/xml-out` are reserved paths, also without a
   trailing path. The alias clash check with DSL endpoints runs only on a
   shared listener. See `book/src/xml-lanes.md`.
 
