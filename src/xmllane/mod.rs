@@ -303,21 +303,13 @@ const RESERVED_PATHS: [&str; 6] = [
 ];
 
 fn sidecar_files(root: &Path) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(d) = stack.pop() {
-        let Ok(rd) = fs::read_dir(&d) else { continue };
-        for p in rd.flatten().map(|e| e.path()) {
+    crate::fswalk::files(root)
+        .into_iter()
+        .filter(|p| {
             let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            if p.is_dir() {
-                stack.push(p);
-            } else if name.ends_with(".xml.yaml") || name.ends_with(".xml.yml") {
-                out.push(p);
-            }
-        }
-    }
-    out.sort();
-    out
+            name.ends_with(".xml.yaml") || name.ends_with(".xml.yml")
+        })
+        .collect()
 }
 
 /// How many raw-XML sidecars under `dir` enable each lane — reads and

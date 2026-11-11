@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Sidecar and WSDL discovery (`inbound`, `xmllane`, `xtr doctor`) uses one shared walk. It enters each
+  directory once (by canonical path), so a symlink cycle no longer creates phantom lanes or stalls boot.
+  It skips directories whose name starts with `.` (the `..data` directories of a Kubernetes ConfigMap
+  mount). Symlinks to files and directories still work. (#43)
+
 ### Added
 - Raw-XML inbound refuses an XML declaration whose `encoding` is not UTF-8
   (HTTP 400 `unsupported_encoding`), also before `forward`. Docs: the `sha256`

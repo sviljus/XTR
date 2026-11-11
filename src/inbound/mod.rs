@@ -312,21 +312,13 @@ pub struct Check {
 }
 
 fn sidecar_files(root: &Path) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(d) = stack.pop() {
-        let Ok(rd) = fs::read_dir(&d) else { continue };
-        for p in rd.flatten().map(|e| e.path()) {
+    crate::fswalk::files(root)
+        .into_iter()
+        .filter(|p| {
             let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            if p.is_dir() {
-                stack.push(p);
-            } else if name.ends_with(".soap.yaml") || name.ends_with(".soap.yml") {
-                out.push(p);
-            }
-        }
-    }
-    out.sort();
-    out
+            name.ends_with(".soap.yaml") || name.ends_with(".soap.yml")
+        })
+        .collect()
 }
 
 /// `wsdl/g/x.soap.yaml` → `wsdl/g/x.wsdl` (or `.WSDL`).
