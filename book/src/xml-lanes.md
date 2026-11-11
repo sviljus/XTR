@@ -157,11 +157,11 @@ and the rest a backend. `forward` and `backend` are mutually exclusive
 per message.
 
 **Loop guard.** XTR adds the header `x-xtr-forwarded: 1` to every forwarded
-request. An inbound request that carries this header is refused with 508
-`loop_detected` before any outbound call. This stops a `forward` that
-points back to an XTR `/xml-in/` route. The guard has a side effect: a
-chain of two XTR instances (XTR A forwards to XTR B) does not work, because
-XTR B refuses the request that XTR A forwarded.
+request. A message with a `forward` that arrives with this header is refused
+with 508 `loop_detected` before any outbound call. This stops a `forward`
+that points back to an XTR `/xml-in/` route. A chain where the second XTR
+forwards the message again is refused with 508. A chain where the second
+XTR sends the message to its backend works.
 
 ## Outbound
 
