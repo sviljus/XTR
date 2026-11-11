@@ -1025,7 +1025,7 @@ fn with_decl(decl: &str) -> String {
     )
 }
 
-/// ERRU XML Message Reference §5.7.2: messages are UTF-8 only. A declaration
+/// MOVEHUB ERRU XML Message Reference v2.06, §5.7.2: messages are UTF-8 only. A declaration
 /// of another encoding is refused, so XTR and a forward target read the same
 /// bytes the same way.
 #[tokio::test]

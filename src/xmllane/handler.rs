@@ -210,7 +210,8 @@ async fn handle_inbound(
         );
     };
     let text_nobom = text.strip_prefix('\u{feff}').unwrap_or(text);
-    // ERRU XML Message Reference §5.7.2: messages are UTF-8 only. Another
+    // MOVEHUB ERRU XML Message Reference v2.06, §5.7.2: messages are UTF-8 only.
+    // The Hub discards any other encoding declaration. Another
     // declared encoding is refused, so XTR and a forward target read the bytes
     // the same way.
     if let Some(enc) = declared_encoding(text_nobom) {
