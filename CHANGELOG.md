@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Optional XSD validation of raw-XML lanes** (sidecar `validate: true`, cargo
+  feature `xsd-validate`, links libxml2, off by default). Inbound and outbound
+  messages that do not match the XSD get HTTP 422 `schema_invalid`.
 - **Raw-XML lanes** (`<name>.xml.yaml` sidecar next to XSD files, no WSDL,
   no SOAP envelope) for peers that exchange bare XML over HTTP(S), e.g.
   the EU ERRU MOVEHUB. Inbound `POST /xml-in/<group>/<name>` (optional

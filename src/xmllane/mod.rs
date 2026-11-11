@@ -24,6 +24,7 @@
 //! namespaces); it is not a validating schema model.
 
 pub mod handler;
+pub mod validate;
 
 use crate::config::{AppConfig, SecurityServer};
 use crate::inbound::contract::{self, QName, Schema};
@@ -50,6 +51,12 @@ pub struct XmlSidecar {
     pub inbound: Option<XmlInbound>,
     #[serde(default)]
     pub outbound: Option<XmlOutbound>,
+    /// Validate every message against the XSD: the received XML before it
+    /// goes to the backend or the forward target, and the generated XML
+    /// before it goes to the peer. A failure answers 422 `schema_invalid`.
+    /// Off by default. Needs the cargo feature `xsd-validate`.
+    #[serde(default)]
+    pub validate: bool,
 }
 
 /// Which way a message type travels on this lane.
@@ -198,6 +205,8 @@ pub struct XmlService {
     pub sidecar: XmlSidecar,
     /// Built at boot when `outbound:` is configured.
     pub http: Option<reqwest::Client>,
+    /// Built at boot when the sidecar says `validate: true`.
+    pub validator: Option<Arc<validate::XsdValidator>>,
 }
 
 impl XmlService {
@@ -465,6 +474,11 @@ fn prepare(root: &Path, sidecar: &Path, cfg: &AppConfig) -> Result<XmlService, S
         entries.push((fname, xml));
     }
     let (schema, _files) = contract::load_xsd(&entries, &loader)?;
+    let validator = if sc.validate {
+        Some(Arc::new(validate::XsdValidator::new(dir, &sc.schemas)?))
+    } else {
+        None
+    };
 
     // Messages → global elements.
     let mut messages = BTreeMap::new();
@@ -634,6 +648,7 @@ fn prepare(root: &Path, sidecar: &Path, cfg: &AppConfig) -> Result<XmlService, S
         messages,
         sidecar: sc,
         http,
+        validator,
     })
 }
 

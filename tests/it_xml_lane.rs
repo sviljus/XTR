@@ -1016,3 +1016,137 @@ async fn forwarded_header_on_a_backend_message_is_accepted() {
     assert_eq!(st, StatusCode::ACCEPTED, "{body}");
     assert_eq!(seen.lock().unwrap().len(), 1);
 }
+
+// ------------------------------------------------------------ XSD validation
+
+/// `validate: true` without the cargo feature must stop the boot.
+#[cfg(not(feature = "xsd-validate"))]
+#[test]
+fn validate_true_without_the_feature_is_refused_at_boot() {
+    let xsd = write_lane("schemas: [Msg.xsd]\nmessages:\n  Notify_Request: {}\ninbound:\n  backend: http://localhost:1/b\nvalidate: true\n");
+    let dsl = TempDir::new().unwrap();
+    let cfg = cfg_for(&xsd, &dsl);
+    let err = xmllane::load_all(Some(xsd.path()), &cfg).expect_err("must fail");
+    assert!(err.contains("xsd-validate"), "{err}");
+}
+
+#[cfg(feature = "xsd-validate")]
+mod xsd_validation {
+    use super::*;
+
+    const NO_TM_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?><Notify_Request xmlns="urn:erru"><Header technicalId="t-1" workflowId="w-1"/><Body businessCaseId="b-1"/></Notify_Request>"#;
+    const UNKNOWN_ATTR_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?><Notify_Request xmlns="urn:erru"><Header technicalId="t-1" workflowId="w-1" bogus="x"/><Body businessCaseId="b-1"><TransportManager/></Body></Notify_Request>"#;
+
+    fn validating(backend: &str) -> String {
+        format!("{}validate: true\n", inbound_sidecar(backend))
+    }
+
+    #[tokio::test]
+    async fn valid_message_passes() {
+        let (backend, seen) = spawn_backend().await;
+        let env = build(&validating(&backend));
+        let (st, body, _) = call(&env.app, xml_post("/xml-in/erru/msg", NOTIFY_XML)).await;
+        assert_eq!(st, StatusCode::ACCEPTED, "{body}");
+        assert_eq!(seen.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn invalid_inbound_is_422_and_never_reaches_the_backend() {
+        let (backend, seen) = spawn_backend().await;
+        let env = build(&validating(&backend));
+        for xml in [NO_TM_XML, UNKNOWN_ATTR_XML] {
+            let (st, body, _) = call(&env.app, xml_post("/xml-in/erru/msg", xml)).await;
+            assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+            let v: Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(v["error"], "schema_invalid");
+            assert!(
+                v["errors"][0]["message"].as_str().unwrap().len() > 3,
+                "{body}"
+            );
+        }
+        assert!(seen.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn without_validate_the_same_message_goes_through() {
+        let (backend, seen) = spawn_backend().await;
+        let env = build(&inbound_sidecar(&backend));
+        let (st, body, _) = call(&env.app, xml_post("/xml-in/erru/msg", NO_TM_XML)).await;
+        assert_eq!(st, StatusCode::ACCEPTED, "{body}");
+        assert_eq!(seen.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn invalid_message_is_not_forwarded() {
+        let (hub, raw) = spawn_peer(202, "").await;
+        let sidecar = format!(
+            "schemas: [Msg.xsd]\nmessages:\n  Notify_Request:\n    forward: {hub}\ninbound:\n  backend: http://localhost:1/b\nvalidate: true\n"
+        );
+        let env = build(&sidecar);
+        let (st, _, _) = call(&env.app, xml_post("/xml-in/erru/msg", NO_TM_XML)).await;
+        assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(raw.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn outbound_validates_the_generated_xml_before_sending() {
+        let (hub, raw) = spawn_peer(202, "").await;
+        let env = build(&format!("{}validate: true\n", outbound_sidecar(&hub)));
+        let (st, body, _) = call(
+            &env.app,
+            json_post("/xml-out/erru/msg/Notify_Request", &notify_json()),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        assert_eq!(raw.lock().unwrap().len(), 1);
+
+        let bad = json!({"Header": {"@technicalId": "t", "@workflowId": "w"}, "Body": {}});
+        let (st, body, _) = call(
+            &env.app,
+            json_post("/xml-out/erru/msg/Notify_Request", &bad),
+        )
+        .await;
+        assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+        assert_eq!(raw.lock().unwrap().len(), 1, "nothing was sent");
+    }
+
+    #[tokio::test]
+    async fn concurrent_validation_is_stable() {
+        let (backend, _seen) = spawn_backend().await;
+        let env = build(&validating(&backend));
+        let mut tasks = Vec::new();
+        for i in 0..64 {
+            let app = env.app.clone();
+            tasks.push(tokio::spawn(async move {
+                let xml = if i % 2 == 0 { NOTIFY_XML } else { NO_TM_XML };
+                let (st, _, _) = call(&app, xml_post("/xml-in/erru/msg", xml)).await;
+                (i % 2 == 0, st)
+            }));
+        }
+        for t in tasks {
+            let (valid, st) = t.await.unwrap();
+            assert_eq!(
+                st,
+                if valid {
+                    StatusCode::ACCEPTED
+                } else {
+                    StatusCode::UNPROCESSABLE_ENTITY
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn remote_schema_location_is_refused_at_boot() {
+        let xsd = write_lane("schemas: [Msg.xsd]\nmessages:\n  Notify_Request: {}\ninbound:\n  backend: http://localhost:1/b\nvalidate: true\n");
+        std::fs::write(
+            xsd.path().join("erru").join("Remote.xsd"),
+            r#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"><xs:import namespace="urn:x" schemaLocation="http://evil.example/x.xsd"/></xs:schema>"#,
+        )
+        .unwrap();
+        let dsl = TempDir::new().unwrap();
+        let cfg = cfg_for(&xsd, &dsl);
+        let err = xmllane::load_all(Some(xsd.path()), &cfg).expect_err("must fail");
+        assert!(err.contains("remote schemaLocation"), "{err}");
+    }
+}

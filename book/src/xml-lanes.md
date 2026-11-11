@@ -192,11 +192,46 @@ an error body — `upstream_timeout` 504, `upstream_unreachable` 502 (no
 URL in the response, it is logged). Once the peer has answered, its
 status is always returned, whatever the body looks like.
 
+## XSD validation (optional)
+
+Set `validate: true` in the sidecar. XTR then checks each message
+against the XSD:
+
+* inbound: the received XML, before the backend call or the forward;
+* outbound: the generated XML, before it goes to the peer.
+
+A message that fails the check gets HTTP 422:
+
+```json
+{ "error": "schema_invalid", "message": "message does not match the XSD",
+  "errors": [ { "line": 1, "message": "Element 'Body': Missing child element(s)…" } ] }
+```
+
+At most 10 errors are returned.
+
+Rules:
+
+* The check needs the cargo feature `xsd-validate`. The feature links the
+  system libxml2. The default build has no C dependency. A sidecar with
+  `validate: true` stops the boot in a build without the feature.
+  Build: `cargo build --release --features xsd-validate`. The build needs
+  the libxml2 development files and `clang`.
+* XSD 1.0 only (libxml2). XSD 1.1 features are not checked.
+* XTR parses the message with its own parser first. That parser refuses
+  a DOCTYPE. libxml2 parses with `NONET` and does not expand entities.
+* A schema file with a remote `schemaLocation` stops the boot.
+* If an entry XSD does not declare the root element, XTR tries the next
+  entry XSD.
+* Not yet proven: the same verdicts as the Xerces validator of the LJVIS
+  ERRU adapter on a large valid corpus. Do not turn `validate` on in
+  production before that check.
+
 ## Not covered
 
-* **XSD validation.** The schema is a codec hint (order, repetition,
-  namespaces). Required elements, enumerations and facets are **not**
-  checked; validate in the backend/caller if the peer requires it.
+
+
+* **XSD validation is off by default.** The schema is a codec hint. See
+  [XSD validation](#xsd-validation-optional) to turn it on.
 * Sync replies in the response body, SOAP, WS-Security, retries, queues.
 * `xtr doctor` only counts `.xml.yaml` lanes for the shared-listener
   exposure check; sidecar contents are validated at boot.

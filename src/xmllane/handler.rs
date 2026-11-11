@@ -111,6 +111,41 @@ fn err(status: StatusCode, code: &str, message: &str) -> Response {
     (status, Json(json!({"error": code, "message": message}))).into_response()
 }
 
+/// XSD check when the sidecar says `validate: true`. `Err` is the 422 answer.
+async fn check_xsd(svc: &super::XmlService, xml: &str) -> Result<(), Box<Response>> {
+    let Some(v) = svc.validator.clone() else {
+        return Ok(());
+    };
+    let xml = xml.to_string();
+    let verdict = match tokio::task::spawn_blocking(move || v.validate(&xml)).await {
+        Ok(r) => r,
+        Err(_) => {
+            return Err(Box::new(err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "validator_failed",
+                "XSD validator did not finish",
+            )))
+        }
+    };
+    verdict.map_err(|errors| {
+        let list: Vec<Value> = errors
+            .iter()
+            .map(|e| json!({"line": e.line, "message": e.message}))
+            .collect();
+        Box::new(
+            (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({
+                    "error": "schema_invalid",
+                    "message": "message does not match the XSD",
+                    "errors": list,
+                })),
+            )
+                .into_response(),
+        )
+    })
+}
+
 async fn post_canonical(
     State(st): State<XmlLaneState>,
     Path((group, name)): Path<(String, String)>,
@@ -210,6 +245,9 @@ async fn handle_inbound(
             &format!("root element {} is not served by this endpoint", root.local),
         );
     };
+    if let Err(r) = check_xsd(svc, text).await {
+        return *r;
+    }
     if let Some(target) = msg.cfg.forward.as_deref() {
         // A forwarded message that is forwarded again is a loop. Refuse it
         // before the outbound call. A forwarded message that goes to a
@@ -366,6 +404,9 @@ async fn call_outbound(
     }
     let element = codec::json_to_root_element(&msg.qname, &value, &svc.schema);
     let xml = format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?>{element}");
+    if let Err(r) = check_xsd(svc, &xml).await {
+        return Ok(*r);
+    }
     let timeout = svc.timeout_for(
         message,
         Duration::from_secs(st.cfg.limits.request_timeout_secs),
