@@ -180,16 +180,6 @@ async fn handle_inbound(
         );
     };
     let ib = svc.sidecar.inbound.as_ref().expect("filtered above");
-    // A message that XTR forwarded and that came back is a forward loop.
-    // Refuse it before any outbound call.
-    if headers.contains_key(FORWARDED_HEADER) {
-        tracing::warn!(group, name, "forward loop detected");
-        return err(
-            StatusCode::LOOP_DETECTED,
-            "loop_detected",
-            "this message was already forwarded by XTR",
-        );
-    }
     let limit = st.cfg.limits.max_request_bytes;
     if body.len() > limit {
         return err(
@@ -221,6 +211,17 @@ async fn handle_inbound(
         );
     };
     if let Some(target) = msg.cfg.forward.as_deref() {
+        // A forwarded message that is forwarded again is a loop. Refuse it
+        // before the outbound call. A forwarded message that goes to a
+        // backend is not a loop.
+        if headers.contains_key(FORWARDED_HEADER) {
+            tracing::warn!(group, name, message = ?root.local, "forward loop detected");
+            return err(
+                StatusCode::LOOP_DETECTED,
+                "loop_detected",
+                "this message was already forwarded by XTR",
+            );
+        }
         return forward_raw(st, target, &root.local, headers, body, &ib.relay_statuses).await;
     }
     let Some(url) = svc.backend_for(&root.local) else {
