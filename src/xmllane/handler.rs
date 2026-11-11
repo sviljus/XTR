@@ -26,6 +26,9 @@ use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use std::time::Duration;
 
+/// Set on every forwarded request. An inbound request that has it is a loop.
+const FORWARDED_HEADER: &str = "x-xtr-forwarded";
+
 #[derive(Clone)]
 pub struct XmlLaneState {
     pub registry: Arc<XmlRegistry>,
@@ -177,6 +180,16 @@ async fn handle_inbound(
         );
     };
     let ib = svc.sidecar.inbound.as_ref().expect("filtered above");
+    // A message that XTR forwarded and that came back is a forward loop.
+    // Refuse it before any outbound call.
+    if headers.contains_key(FORWARDED_HEADER) {
+        tracing::warn!(group, name, "forward loop detected");
+        return err(
+            StatusCode::LOOP_DETECTED,
+            "loop_detected",
+            "this message was already forwarded by XTR",
+        );
+    }
     let limit = st.cfg.limits.max_request_bytes;
     if body.len() > limit {
         return err(
@@ -395,8 +408,8 @@ async fn call_outbound(
                 ns: root.ns.clone(),
                 local: root.local.clone(),
             };
-            svc.schema.element(&q)?;
-            let ty = svc.schema.element(&q).and_then(|t| svc.schema.resolve(t));
+            let element = svc.schema.element(&q)?;
+            let ty = svc.schema.resolve(element);
             Some(json!({
                 "message": root.local,
                 "content": codec::element_to_json(&root, ty, &svc.schema),
@@ -439,6 +452,7 @@ async fn forward_raw(
         .post(target)
         .header(header::CONTENT_TYPE, content_type)
         .header("x-xtr-message", message)
+        .header(FORWARDED_HEADER, "1")
         .body(body.to_vec());
     if let Some(tp) = headers.get("traceparent") {
         req = req.header("traceparent", tp.clone());
