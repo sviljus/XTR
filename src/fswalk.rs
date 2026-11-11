@@ -3,7 +3,10 @@
 //!
 //! * A directory is entered once. The walk tracks directories by canonical
 //!   path, so a symlink cycle (`loop -> .`) adds nothing.
-//! * Symlinks to files and to directories still work. Kubernetes volume mounts
+//! * A symlink to a directory is followed only when the target is inside the
+//!   root. A link out of the root (`x -> /`, `x -> ../../other`) is ignored.
+//! * The walk stops after [`MAX_ENTRIES`] directories and files.
+//! * Symlinks to files and to directories inside the root still work. Kubernetes volume mounts
 //!   use them.
 //! * A directory whose name starts with `.` is skipped. This covers the
 //!   `..data` and `..<timestamp>` directories of a Kubernetes ConfigMap mount,
@@ -12,25 +15,37 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+/// Upper limit of directories and files the walk reads.
+pub const MAX_ENTRIES: usize = 50_000;
+
 /// All files under `root`, sorted. The result has no path twice.
 pub fn files(root: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut seen: HashSet<PathBuf> = HashSet::new();
-    if let Ok(c) = root.canonicalize() {
-        seen.insert(c);
-    }
+    let Ok(canonical_root) = root.canonicalize() else {
+        return out;
+    };
+    seen.insert(canonical_root.clone());
     let mut stack = vec![root.to_path_buf()];
     while let Some(d) = stack.pop() {
         let Ok(rd) = std::fs::read_dir(&d) else {
             continue;
         };
         for p in rd.flatten().map(|e| e.path()) {
+            if out.len() + seen.len() > MAX_ENTRIES {
+                tracing::warn!(root = %root.display(), "directory walk stopped: too many entries");
+                out.sort();
+                return out;
+            }
             if p.is_dir() {
                 let hidden = p
                     .file_name()
                     .and_then(|n| n.to_str())
                     .is_some_and(|n| n.starts_with('.'));
-                if !hidden && p.canonicalize().is_ok_and(|c| seen.insert(c)) {
+                if !hidden
+                    && p.canonicalize()
+                        .is_ok_and(|c| c.starts_with(&canonical_root) && seen.insert(c))
+                {
                     stack.push(p);
                 }
             } else {
@@ -86,6 +101,25 @@ mod tests {
         symlink("../b", d.path().join("a/to_b")).unwrap();
         symlink("../a", d.path().join("b/to_a")).unwrap();
         assert_eq!(names(d.path()), ["a/f.yaml"]);
+    }
+
+    /// A symlink must not lead out of the root: files outside are not ours.
+    #[test]
+    fn a_symlink_out_of_the_root_is_not_followed() {
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path().join("wsdl");
+        touch(&root.join("g/a.yaml"));
+        touch(&d.path().join("outside/secret.yaml"));
+        symlink("../../outside", root.join("g/escape")).unwrap();
+        assert_eq!(names(&root), ["g/a.yaml"]);
+    }
+
+    #[test]
+    fn a_symlink_to_the_filesystem_root_is_not_followed() {
+        let d = tempfile::tempdir().unwrap();
+        touch(&d.path().join("g/a.yaml"));
+        symlink("/", d.path().join("g/everything")).unwrap();
+        assert_eq!(names(d.path()), ["g/a.yaml"]);
     }
 
     #[test]

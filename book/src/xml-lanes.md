@@ -35,11 +35,20 @@ one listener, set `inbound.port` or `XTR_INTER_SERVICE_TOKEN`.
 > with the message ids (`technicalId`, `workflowId`). Replay detection,
 > persistence and retries are the backend's / caller's job.
 
-**Encoding.** The MOVEHUB ERRU XML Message Reference (v2.06, section 5.7.2) allows
-UTF-8 only. The Hub discards any other encoding declaration. An XML
-declaration with another `encoding` (for example `ISO-8859-1` or `UTF-7`)
-gets HTTP 400 `unsupported_encoding`. A declaration with UTF-8 (any case)
-or without `encoding` is accepted. The check also runs before `forward`.
+**Encoding and prolog.** The MOVEHUB ERRU XML Message Reference (v2.06,
+section 5.7.2) allows UTF-8 only. The Hub discards any other encoding
+declaration. XTR refuses a message with HTTP 400 in these cases:
+
+* The XML declaration names an encoding that is not `UTF-8` or `utf8`
+  (any case): `unsupported_encoding`. The check also runs before `forward`.
+* The prolog is not well-formed XML: the XML declaration is not the first
+  item (a space, a comment or a second BOM comes before it), it is repeated,
+  its `version` is not 1.0 or 1.1, or it comes after the root element.
+  A processing instruction named `xml` (any case) is refused. Text outside
+  the root element is refused, except white space: `malformed_xml`.
+
+One leading BOM is allowed. A declaration without `encoding`, or no
+declaration, is accepted.
 
 ## Layout and sidecar
 
