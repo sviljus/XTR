@@ -22,6 +22,12 @@ covered by `XTR_INTER_SERVICE_TOKEN` — never expose it to the peer
 network. The same exposure rule applies: when inbound and outbound share
 one listener, set `inbound.port` or `XTR_INTER_SERVICE_TOKEN`.
 
+> **`/xml-in/` has no authentication.** This includes every `inbound.path`
+> alias. XTR does not check a token, a certificate or a source address on
+> these routes. Restrict them at the ingress (IP allowlist or mTLS). Set
+> the rate limit at the ingress. Each accepted request makes one call to
+> the backend.
+
 > **XTR stays stateless.** There is no queue, retry, outbox or deadline
 > handling. XTR hands the backend the received bytes and their SHA-256
 > digest; replay detection, persistence and retries are the backend's /
@@ -114,6 +120,14 @@ peer URLs rejected by the same SSRF guard as WSDL-declared URLs
    | 5xx / unreachable / timeout | 502 / 502 / 504, no backend details |
    | `XTR_OFFLINE` | 503 `offline` |
 
+   The backend owns the body of a relayed 4xx. XTR sends it to the peer
+   as it is, and always with `Content-Type: application/json`, also when
+   the backend sent another type. The peer can be anyone who reaches
+   `/xml-in/`. The backend must not put internal details (stack traces,
+   SQL errors, internal URLs) into the body of a status listed in
+   `relay_statuses`. XTR cuts a relayed body that is over the response
+   limit (`limits.max_response_bytes`). The cut JSON can be incomplete.
+
    A peer that retries a failed delivery meets the backend's own
    idempotency (`sha256` + the message ids in `request`).
 
@@ -126,16 +140,28 @@ body to the peer. Only 2xx answers and the 4xx codes listed in
 status (3xx, 5xx, and e.g. 401/404, which usually mean a wrong target URL
 or credentials rather than a verdict on the message) becomes a plain
 502 `forward_error`, as does an unreachable target; the details only reach
-the log. A relayed answer whose body is unreadable or over the response
-limit is relayed with an empty body (status kept, warning logged).
+the log. A forwarded answer whose body is unreadable or over the response
+limit is relayed with an empty body (status kept, warning logged). The
+`Content-Type` of the target is kept, so the answer can be an empty
+`application/xml`. (A relayed 4xx from a *backend* is different: XTR cuts
+that body, see the table above.)
 While `XTR_OFFLINE` is set the forward is blocked too (503 `offline`). Nothing is decoded
-or stored. The target URL is checked for scheme only (like backend URLs);
-the forward client has no client certificate — front the target with an
-internal hop if it needs mTLS. Use it to move one
+or stored. The target URL is checked for scheme only (like backend URLs).
+The SSRF guard of the outbound lane does not apply to `forward` and
+`backend` URLs: they are operator configuration. The forward client (and
+the backend client) has no client certificate and no custom CA. Front the
+target with an internal hop if it needs mTLS or a private CA. Use it to move one
 message type at a time from an old receiver to a new backend: list every
 message type, give the ones still served by the old system a `forward`,
 and the rest a backend. `forward` and `backend` are mutually exclusive
 per message.
+
+**Loop guard.** XTR adds the header `x-xtr-forwarded: 1` to every forwarded
+request. An inbound request that carries this header is refused with 508
+`loop_detected` before any outbound call. This stops a `forward` that
+points back to an XTR `/xml-in/` route. The guard has a side effect: a
+chain of two XTR instances (XTR A forwards to XTR B) does not work, because
+XTR B refuses the request that XTR A forwarded.
 
 ## Outbound
 
