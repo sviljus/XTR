@@ -161,6 +161,20 @@ fn hex(bytes: &[u8]) -> String {
     })
 }
 
+/// Value of `encoding` in the XML declaration, if the text starts with one.
+fn declared_encoding(text: &str) -> Option<&str> {
+    let decl = text.strip_prefix("<?xml")?;
+    let decl = &decl[..decl.find("?>")?];
+    let i = decl.find("encoding")?;
+    let rest = decl[i + "encoding".len()..]
+        .trim_start()
+        .strip_prefix('=')?;
+    let rest = rest.trim_start();
+    let quote = rest.chars().next().filter(|c| *c == '"' || *c == '\'')?;
+    let rest = &rest[1..];
+    Some(&rest[..rest.find(quote)?])
+}
+
 async fn handle_inbound(
     st: &XmlLaneState,
     group: &str,
@@ -195,7 +209,20 @@ async fn handle_inbound(
             "request body is not valid UTF-8",
         );
     };
-    let root = match dom::parse(text.strip_prefix('\u{feff}').unwrap_or(text)) {
+    let text_nobom = text.strip_prefix('\u{feff}').unwrap_or(text);
+    // ERRU XML Message Reference §5.7.2: messages are UTF-8 only. Another
+    // declared encoding is refused, so XTR and a forward target read the bytes
+    // the same way.
+    if let Some(enc) = declared_encoding(text_nobom) {
+        if !enc.eq_ignore_ascii_case("utf-8") && !enc.eq_ignore_ascii_case("utf8") {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "unsupported_encoding",
+                "XML declaration must say UTF-8 or leave the encoding out",
+            );
+        }
+    }
+    let root = match dom::parse(text_nobom) {
         Ok(r) => r,
         Err(e) => return err(StatusCode::BAD_REQUEST, "malformed_xml", &e.0),
     };

@@ -30,8 +30,15 @@ one listener, set `inbound.port` or `XTR_INTER_SERVICE_TOKEN`.
 
 > **XTR stays stateless.** There is no queue, retry, outbox or deadline
 > handling. XTR hands the backend the received bytes and their SHA-256
-> digest; replay detection, persistence and retries are the backend's /
-> caller's job.
+> digest. The digest proves the integrity of the received bytes and
+> supports audit. It does not detect duplicates: the backend detects them
+> with the message ids (`technicalId`, `workflowId`). Replay detection,
+> persistence and retries are the backend's / caller's job.
+
+**Encoding.** The ERRU XML Message Reference allows UTF-8 only. An XML
+declaration with another `encoding` (for example `ISO-8859-1` or `UTF-7`)
+gets HTTP 400 `unsupported_encoding`. A declaration with UTF-8 (any case)
+or without `encoding` is accepted. The check also runs before `forward`.
 
 ## Layout and sidecar
 
@@ -129,7 +136,8 @@ peer URLs rejected by the same SSRF guard as WSDL-declared URLs
    limit (`limits.max_response_bytes`). The cut JSON can be incomplete.
 
    A peer that retries a failed delivery meets the backend's own
-   idempotency (`sha256` + the message ids in `request`).
+   idempotency (the message ids in `request`). Use `sha256` to check
+   that two deliveries carry the same bytes.
 
 ### Staged migration: `forward`
 
