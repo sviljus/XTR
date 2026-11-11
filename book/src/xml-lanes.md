@@ -35,7 +35,8 @@ one listener, set `inbound.port` or `XTR_INTER_SERVICE_TOKEN`.
 > with the message ids (`technicalId`, `workflowId`). Replay detection,
 > persistence and retries are the backend's / caller's job.
 
-**Encoding.** The ERRU XML Message Reference allows UTF-8 only. An XML
+**Encoding.** The MOVEHUB ERRU XML Message Reference (v2.06, section 5.7.2) allows
+UTF-8 only. The Hub discards any other encoding declaration. An XML
 declaration with another `encoding` (for example `ISO-8859-1` or `UTF-7`)
 gets HTTP 400 `unsupported_encoding`. A declaration with UTF-8 (any case)
 or without `encoding` is accepted. The check also runs before `forward`.
