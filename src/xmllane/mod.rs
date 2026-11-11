@@ -73,6 +73,22 @@ impl Direction {
     }
 }
 
+impl XmlSidecar {
+    /// Backend URL of an inbound message: the message override, else
+    /// `<inbound.backend>/<Message>`.
+    pub fn backend_for(&self, message: &str) -> Option<String> {
+        let own = self
+            .messages
+            .get(message)
+            .and_then(|m| m.as_ref())
+            .and_then(|c| c.backend.clone());
+        own.or_else(|| {
+            let base = self.inbound.as_ref()?.backend.as_deref()?;
+            Some(format!("{}/{}", base.trim_end_matches('/'), message))
+        })
+    }
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MessageCfg {
@@ -186,17 +202,7 @@ pub struct XmlService {
 
 impl XmlService {
     pub fn backend_for(&self, message: &str) -> Option<String> {
-        let ib = self.sidecar.inbound.as_ref()?;
-        if let Some(b) = self
-            .messages
-            .get(message)
-            .and_then(|m| m.cfg.backend.clone())
-        {
-            return Some(b);
-        }
-        ib.backend
-            .as_deref()
-            .map(|b| format!("{}/{}", b.trim_end_matches('/'), message))
+        self.sidecar.backend_for(message)
     }
 
     pub fn url_for(&self, message: &str) -> Option<String> {
@@ -240,13 +246,18 @@ impl XmlRegistry {
     }
 
     /// `inbound.path` aliases that shadow a DSL endpoint `/:group/:service`
-    /// (the static alias would win and silently take its POSTs).
+    /// (the static alias would win and silently take its POSTs). With a
+    /// separate `inbound.port` the aliases live on their own listener: no clash.
     pub fn alias_conflicts(
         &self,
         is_dsl: impl Fn(&str, &str) -> bool,
-        _separate_port: bool,
+        separate_port: bool,
     ) -> Vec<String> {
         let mut out = Vec::new();
+        if separate_port {
+            // The alias is on its own listener. It cannot shadow a DSL endpoint.
+            return out;
+        }
         for svc in self.iter() {
             let Some(p) = svc.sidecar.inbound.as_ref().and_then(|i| i.path.as_deref()) else {
                 continue;
@@ -282,7 +293,14 @@ impl XmlRegistry {
     }
 }
 
-const RESERVED_PATHS: [&str; 4] = ["/health", "/api", "/soap-in", "/soap-out"];
+const RESERVED_PATHS: [&str; 6] = [
+    "/health",
+    "/api",
+    "/soap-in",
+    "/soap-out",
+    "/xml-in",
+    "/xml-out",
+];
 
 fn sidecar_files(root: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
@@ -506,9 +524,7 @@ fn prepare(root: &Path, sidecar: &Path, cfg: &AppConfig) -> Result<XmlService, S
                 || p.contains(['{', '}', ':', '*', '?', '#', ' '])
                 || RESERVED_PATHS
                     .iter()
-                    .any(|r| p == r || p.starts_with(&format!("{r}/")))
-                || p.starts_with("/xml-in/")
-                || p.starts_with("/xml-out/");
+                    .any(|r| p.trim_end_matches('/') == *r || p.starts_with(&format!("{r}/")));
             if bad {
                 return Err(format!(
                     "inbound.path {p:?} must be a literal absolute path that does not use a reserved prefix"
@@ -536,7 +552,7 @@ fn prepare(root: &Path, sidecar: &Path, cfg: &AppConfig) -> Result<XmlService, S
                 }
                 continue;
             }
-            let url = sc_backend(&sc, m).ok_or_else(|| {
+            let url = sc.backend_for(m).ok_or_else(|| {
                 format!("message {m} has no backend (set inbound.backend or messages.{m}.backend)")
             })?;
             http_url("backend URL", &url)?;
@@ -619,21 +635,6 @@ fn prepare(root: &Path, sidecar: &Path, cfg: &AppConfig) -> Result<XmlService, S
         sidecar: sc,
         http,
     })
-}
-
-fn sc_backend(sc: &XmlSidecar, message: &str) -> Option<String> {
-    if let Some(Some(b)) = sc
-        .messages
-        .get(message)
-        .map(|m| m.as_ref().and_then(|c| c.backend.clone()))
-    {
-        return Some(b);
-    }
-    sc.inbound
-        .as_ref()?
-        .backend
-        .as_deref()
-        .map(|b| format!("{}/{}", b.trim_end_matches('/'), message))
 }
 
 fn build_http(
