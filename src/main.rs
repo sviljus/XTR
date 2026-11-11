@@ -184,8 +184,10 @@ async fn serve_inner() -> anyhow::Result<()> {
     // Raw-XML lanes (`*.xml.yaml`): same directory, same exposure rules.
     let xml_registry = xmllane::load_all(soap_dir.as_deref(), &cfg).map_err(anyhow::Error::msg)?;
     let inbound_port = cfg.inbound.port.filter(|p| *p != cfg.port);
-    let alias_clash = xml_registry
-        .alias_conflicts(|g, n| state.services.contains_key(&(g.to_string(), n.to_string())));
+    let alias_clash = xml_registry.alias_conflicts(
+        |g, n| state.services.contains_key(&(g.to_string(), n.to_string())),
+        inbound_port.is_some(),
+    );
     if !alias_clash.is_empty() {
         anyhow::bail!(
             "invalid raw-XML lane configuration:\n  {}",
