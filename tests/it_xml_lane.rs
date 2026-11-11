@@ -1094,3 +1094,97 @@ fn symlink_cycle_in_the_lane_directory_creates_no_phantom_lanes() {
     assert_eq!(reg.len(), 1, "one sidecar, one lane");
     assert_eq!(xmllane::count_lanes(Some(xsd.path())).inbound, 1);
 }
+
+// ------------------------------------------------------------ well-formedness of the prolog
+
+/// The checks sit in the parser, so a form that is not well-formed XML is
+/// refused, not only the plain `encoding="X"` form. ERRU Reference §6: the
+/// receiver must check that a message is well-formed XML.
+#[tokio::test]
+async fn inbound_refuses_prolog_forms_that_hide_or_break_the_declaration() {
+    let (backend, seen) = spawn_backend().await;
+    let env = build(&inbound_sidecar(&backend));
+    let root = r#"<Notify_Request xmlns="urn:erru"><Header technicalId="t-1" workflowId="w-1"/><Body businessCaseId="b-1"><TransportManager/></Body></Notify_Request>"#;
+    let bom = "\u{feff}";
+    let cases: Vec<(&str, String)> = vec![
+        (
+            "space before decl",
+            format!(r#" <?xml version="1.0" encoding="UTF-7"?>{root}"#),
+        ),
+        (
+            "newline before decl",
+            format!("\n<?xml version=\"1.0\" encoding=\"UTF-7\"?>{root}"),
+        ),
+        (
+            "comment before decl",
+            format!(r#"<!--c--><?xml version="1.0" encoding="UTF-7"?>{root}"#),
+        ),
+        (
+            "pi before decl",
+            format!(r#"<?xml-foo?><?xml version="1.0" encoding="UTF-7"?>{root}"#),
+        ),
+        (
+            "encoding inside version",
+            format!(r#"<?xml version="encoding='utf-8'" encoding="UTF-7"?>{root}"#),
+        ),
+        (
+            "glued attributes",
+            format!(r#"<?xml version="1.0"encoding="UTF-7"?>{root}"#),
+        ),
+        (
+            "unquoted encoding",
+            format!(r#"<?xml version="1.0" encoding=UTF-7?>{root}"#),
+        ),
+        (
+            "double BOM",
+            format!(r#"{bom}{bom}<?xml version="1.0" encoding="UTF-7"?>{root}"#),
+        ),
+        (
+            "upper-case XML target",
+            format!(r#"<?XML version="1.0" encoding="UTF-7"?>{root}"#),
+        ),
+        (
+            "decl after root",
+            format!(r#"{root}<?xml version="1.0" encoding="UTF-7"?>"#),
+        ),
+        (
+            "second decl",
+            format!(r#"<?xml version="1.0"?><?xml version="1.0" encoding="UTF-7"?>{root}"#),
+        ),
+        ("text before root", format!("junk{root}")),
+        ("bad version", format!(r#"<?xml version="2.0"?>{root}"#)),
+    ];
+    for (name, xml) in &cases {
+        let (st, body, _) = call(&env.app, xml_post("/xml-in/erru/msg", xml)).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{name}: {body}");
+    }
+    // UTF-16LE without BOM and without declaration: NUL bytes, not XML.
+    let utf16: Vec<u8> = root.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
+    let req = Request::post("/xml-in/erru/msg")
+        .body(Body::from(utf16))
+        .unwrap();
+    let (st, _, _) = call(&env.app, req).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    assert!(
+        seen.lock().unwrap().is_empty(),
+        "backend must not be called"
+    );
+}
+
+#[tokio::test]
+async fn inbound_still_accepts_one_bom_and_a_well_formed_prolog() {
+    let (backend, seen) = spawn_backend().await;
+    let env = build(&inbound_sidecar(&backend));
+    let root = r#"<Notify_Request xmlns="urn:erru"><Header technicalId="t-1" workflowId="w-1"/><Body businessCaseId="b-1"><TransportManager/></Body></Notify_Request>"#;
+    let ok = [
+        format!("\u{feff}<?xml version=\"1.0\" encoding=\"UTF-8\"?>{root}"),
+        format!("<?xml version=\"1.1\" encoding=\"utf8\" standalone=\"yes\"?><!--c-->\n{root}\n<!--end-->\n"),
+        format!("<?xml-stylesheet href=\"x\"?>{root}"),
+        format!("\n  {root}  \n"),
+    ];
+    for xml in &ok {
+        let (st, body, _) = call(&env.app, xml_post("/xml-in/erru/msg", xml)).await;
+        assert_eq!(st, StatusCode::ACCEPTED, "{xml}: {body}");
+    }
+    assert_eq!(seen.lock().unwrap().len(), ok.len());
+}
