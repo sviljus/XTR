@@ -1079,3 +1079,18 @@ async fn inbound_accepts_utf8_declarations_in_any_case_and_no_declaration() {
     }
     assert_eq!(seen.lock().unwrap().len(), ok.len());
 }
+
+// ------------------------------------------------------------ symlink cycles (#43)
+
+/// A symlink that points to a parent directory must not create phantom lanes.
+#[cfg(unix)]
+#[test]
+fn symlink_cycle_in_the_lane_directory_creates_no_phantom_lanes() {
+    let xsd = write_lane("schemas: [Msg.xsd]\nmessages:\n  Notify_Request: {}\ninbound:\n  backend: http://localhost:1/b\n");
+    std::os::unix::fs::symlink(".", xsd.path().join("erru").join("loop")).unwrap();
+    let dsl = TempDir::new().unwrap();
+    let cfg = cfg_for(&xsd, &dsl);
+    let reg = xmllane::load_all(Some(xsd.path()), &cfg).unwrap();
+    assert_eq!(reg.len(), 1, "one sidecar, one lane");
+    assert_eq!(xmllane::count_lanes(Some(xsd.path())).inbound, 1);
+}
