@@ -1016,3 +1016,66 @@ async fn forwarded_header_on_a_backend_message_is_accepted() {
     assert_eq!(st, StatusCode::ACCEPTED, "{body}");
     assert_eq!(seen.lock().unwrap().len(), 1);
 }
+
+// ------------------------------------------------------------ declared encoding
+
+fn with_decl(decl: &str) -> String {
+    format!(
+        r#"{decl}<Notify_Request xmlns="urn:erru"><Header technicalId="t-1" workflowId="w-1"/><Body businessCaseId="b-1"><TransportManager/></Body></Notify_Request>"#
+    )
+}
+
+/// ERRU XML Message Reference §5.7.2: messages are UTF-8 only. A declaration
+/// of another encoding is refused, so XTR and a forward target read the same
+/// bytes the same way.
+#[tokio::test]
+async fn inbound_refuses_a_declared_encoding_other_than_utf8() {
+    let (backend, seen) = spawn_backend().await;
+    let (hub, raw) = spawn_peer(202, "").await;
+    let sidecar = format!(
+        "schemas: [Msg.xsd]\nmessages:\n  Notify_Request: {{}}\n  Notify_Acknowledgement:\n    forward: {hub}\ninbound:\n  backend: {backend}\n"
+    );
+    let env = build(&sidecar);
+    for decl in [
+        r#"<?xml version="1.0" encoding="UTF-7"?>"#,
+        r#"<?xml version="1.0" encoding="ISO-8859-1"?>"#,
+        r#"<?xml version="1.0" encoding="UTF-16"?>"#,
+        r#"<?xml version='1.0' encoding='windows-1252'?>"#,
+        r#"<?xml version="1.0" standalone="yes" encoding = "latin1" ?>"#,
+    ] {
+        let (st, body, _) = call(&env.app, xml_post("/xml-in/erru/msg", &with_decl(decl))).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{decl}: {body}");
+        assert!(body.contains("unsupported_encoding"), "{decl}: {body}");
+    }
+    // The forward path refuses it too.
+    let fwd = with_decl(r#"<?xml version="1.0" encoding="ISO-8859-1"?>"#)
+        .replace("Notify_Request", "Notify_Acknowledgement");
+    let (st, _, _) = call(&env.app, xml_post("/xml-in/erru/msg", &fwd)).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    assert!(
+        seen.lock().unwrap().is_empty(),
+        "backend must not be called"
+    );
+    assert!(
+        raw.lock().unwrap().is_empty(),
+        "forward target must not be called"
+    );
+}
+
+#[tokio::test]
+async fn inbound_accepts_utf8_declarations_in_any_case_and_no_declaration() {
+    let (backend, seen) = spawn_backend().await;
+    let env = build(&inbound_sidecar(&backend));
+    let ok = [
+        r#"<?xml version="1.0" encoding="UTF-8"?>"#,
+        r#"<?xml version="1.0" encoding="utf-8"?>"#,
+        r#"<?xml version='1.0' encoding='utf8'?>"#,
+        r#"<?xml version="1.0"?>"#,
+        "",
+    ];
+    for decl in ok {
+        let (st, body, _) = call(&env.app, xml_post("/xml-in/erru/msg", &with_decl(decl))).await;
+        assert_eq!(st, StatusCode::ACCEPTED, "{decl}: {body}");
+    }
+    assert_eq!(seen.lock().unwrap().len(), ok.len());
+}
