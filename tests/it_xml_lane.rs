@@ -74,6 +74,7 @@ async fn spawn_backend() -> (String, Seen) {
             "dup" => (StatusCode::CONFLICT, Json(json!({"code": "conflict"}))).into_response(),
             "boom" => (StatusCode::INTERNAL_SERVER_ERROR, "db password leaked").into_response(),
             "nf" => (StatusCode::NOT_FOUND, "no such route /secret/path").into_response(),
+            "big" => (StatusCode::CONFLICT, "x".repeat(1000)).into_response(),
             _ => StatusCode::NO_CONTENT.into_response(),
         }
     }
@@ -150,6 +151,7 @@ struct Opts {
     offline: bool,
     max_request_bytes: Option<usize>,
     max_response_bytes: Option<usize>,
+    request_timeout_secs: Option<u64>,
 }
 
 fn build(sidecar: &str) -> Env {
@@ -165,6 +167,9 @@ fn build_opts(sidecar: &str, o: Opts) -> Env {
     }
     if let Some(n) = o.max_response_bytes {
         cfg.limits.max_response_bytes = n;
+    }
+    if let Some(n) = o.request_timeout_secs {
+        cfg.limits.request_timeout_secs = n;
     }
     let token = o.token.map(|t| Arc::new(t.to_string()));
     let services = loader::load_all(&cfg.dsl_path).unwrap();
@@ -871,11 +876,130 @@ fn alias_shadowing_a_dsl_endpoint_is_reported_and_lanes_are_counted() {
     let dsl = TempDir::new().unwrap();
     let cfg = cfg_for(&xsd, &dsl);
     let reg = xmllane::load_all(Some(xsd.path()), &cfg).unwrap();
-    assert!(reg.alias_conflicts(|_, _| false).is_empty());
-    let c = reg.alias_conflicts(|g, n| (g, n) == ("erru", "xml"));
+    assert!(reg.alias_conflicts(|_, _| false, false).is_empty());
+    let c = reg.alias_conflicts(|g, n| (g, n) == ("erru", "xml"), false);
     assert_eq!(c.len(), 1, "{c:?}");
     assert!(c[0].contains("/erru/xml"));
     // Doctor-side count reads the YAML only.
     let sum = xmllane::count_lanes(Some(xsd.path()));
     assert_eq!((sum.inbound, sum.outbound), (1, 1));
+}
+
+// ------------------------------------------------- review fixes (issue #40)
+
+#[tokio::test]
+async fn inbound_rejects_root_in_a_foreign_namespace() {
+    let (backend, seen) = spawn_backend().await;
+    let env = build(&inbound_sidecar(&backend));
+    // Right local name, wrong namespace.
+    let foreign = NOTIFY_XML.replace("urn:erru", "urn:other");
+    let (st, body, _) = call(&env.app, xml_post("/xml-in/erru/msg", &foreign)).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("unsupported_message"), "{body}");
+    assert!(
+        seen.lock().unwrap().is_empty(),
+        "backend must not be called"
+    );
+}
+
+#[tokio::test]
+async fn inbound_relayed_4xx_over_limit_is_cut() {
+    let (backend, _seen) = spawn_backend().await;
+    let env = build_opts(
+        &inbound_sidecar(&backend),
+        Opts {
+            max_response_bytes: Some(64),
+            ..Default::default()
+        },
+    );
+    let big = NOTIFY_XML.replace("t-1", "big");
+    let (st, body, headers) = call(&env.app, xml_post("/xml-in/erru/msg", &big)).await;
+    // The status stays. The body is cut at the limit, not dropped.
+    assert_eq!(st, StatusCode::CONFLICT);
+    assert_eq!(body.len(), 64, "{body}");
+    assert_eq!(headers["content-type"], "application/json");
+}
+
+#[test]
+fn alias_on_separate_inbound_port_does_not_clash_with_dsl() {
+    let sidecar = "schemas: [Msg.xsd]\nmessages: {Notify_Request: {}}\ninbound: {backend: 'http://b', path: /erru/xml}\n";
+    let xsd = write_lane(sidecar);
+    let dsl = TempDir::new().unwrap();
+    let cfg = cfg_for(&xsd, &dsl);
+    let reg = xmllane::load_all(Some(xsd.path()), &cfg).unwrap();
+    let dsl_has = |g: &str, n: &str| (g, n) == ("erru", "xml");
+    // Shared listener: the alias would shadow the DSL endpoint.
+    assert_eq!(reg.alias_conflicts(dsl_has, false).len(), 1);
+    // Separate `inbound.port`: the alias is on its own listener. No clash.
+    assert!(reg.alias_conflicts(dsl_has, true).is_empty());
+}
+
+#[test]
+fn inbound_path_rejects_bare_lane_prefixes() {
+    for p in ["/xml-in", "/xml-out", "/xml-in/", "/xml-out/x"] {
+        let e = load_err(&format!(
+            "schemas: [Msg.xsd]\nmessages: {{Notify_Request: {{}}}}\ninbound: {{backend: 'http://b', path: {p}}}\n"
+        ));
+        assert!(e.contains("inbound.path"), "{p}: {e}");
+    }
+}
+
+#[tokio::test]
+async fn forward_to_own_inbound_is_refused_as_a_loop() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    // XTR forwards a message to its own /xml-in. The loop must stop at once.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (backend, _seen) = spawn_backend().await;
+    let env = build_opts(
+        &format!(
+            "schemas: [Msg.xsd]\nmessages:\n  Notify_Request:\n    forward: http://127.0.0.1:{port}/xml-in/erru/msg\ninbound:\n  backend: {backend}\n"
+        ),
+        Opts {
+            request_timeout_secs: Some(2),
+            ..Default::default()
+        },
+    );
+
+    // Direct check: a request that carries the guard header is refused.
+    let mut req = xml_post("/xml-in/erru/msg", NOTIFY_XML);
+    req.headers_mut()
+        .insert("x-xtr-forwarded", "1".parse().unwrap());
+    let (st, body, _) = call(&env.app, req).await;
+    assert_eq!(st, StatusCode::LOOP_DETECTED, "{body}");
+    assert!(body.contains("loop_detected"), "{body}");
+
+    // End to end: count the hits on a real listener. A runaway loop is cut at 20.
+    let hits = Arc::new(AtomicUsize::new(0));
+    let counter = hits.clone();
+    let app = env.app.clone().layer(axum::middleware::from_fn(
+        move |req: Request<Body>, next: axum::middleware::Next| {
+            let counter = counter.clone();
+            async move {
+                if counter.fetch_add(1, Ordering::SeqCst) >= 20 {
+                    return axum::response::IntoResponse::into_response(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                    );
+                }
+                next.run(req).await
+            }
+        },
+    ));
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://127.0.0.1:{port}/xml-in/erru/msg"))
+        .header("content-type", "application/xml")
+        .body(NOTIFY_XML)
+        .send()
+        .await
+        .unwrap();
+    // The first hop forwards. The second hop sees the guard header and answers 508.
+    // The first hop reports the failed forward target as 502.
+    assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        2,
+        "loop must stop after one hop"
+    );
 }

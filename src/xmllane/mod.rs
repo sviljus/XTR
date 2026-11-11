@@ -241,7 +241,11 @@ impl XmlRegistry {
 
     /// `inbound.path` aliases that shadow a DSL endpoint `/:group/:service`
     /// (the static alias would win and silently take its POSTs).
-    pub fn alias_conflicts(&self, is_dsl: impl Fn(&str, &str) -> bool) -> Vec<String> {
+    pub fn alias_conflicts(
+        &self,
+        is_dsl: impl Fn(&str, &str) -> bool,
+        _separate_port: bool,
+    ) -> Vec<String> {
         let mut out = Vec::new();
         for svc in self.iter() {
             let Some(p) = svc.sidecar.inbound.as_ref().and_then(|i| i.path.as_deref()) else {
