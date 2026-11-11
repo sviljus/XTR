@@ -21,8 +21,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Reuses the SOAP lanes' codec and SSRF guard; stateless by design. No
   XSD validation. Backend 4xx codes reach the peer only when listed in
   `inbound.relay_statuses` (default 400/409/422), `messages.X.direction`
-  (`in`/`out`/`both`) scopes a message to one side. See
-  `book/src/xml-lanes.md`.
+  (`in`/`out`/`both`) scopes a message to one side. A `forward` loop
+  guard (`x-xtr-forwarded` request header) makes XTR answer 508
+  `loop_detected` when a forwarded message comes back to an inbound
+  route. `/xml-in` and `/xml-out` are reserved paths, also without a
+  trailing path. The alias clash check with DSL endpoints runs only on a
+  shared listener. See `book/src/xml-lanes.md`.
 
 ## [0.5.1-rc] - 2026-10-22
 
