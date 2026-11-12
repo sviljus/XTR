@@ -10,7 +10,7 @@
 //! backend's / caller's business — XTR hands them the received bytes
 //! and their SHA-256 digest so they can decide.
 
-use super::{ValidateMode, XmlRegistry, XmlService};
+use super::{LogLimit, ValidateMode, XmlRegistry, XmlService};
 use crate::config::AppConfig;
 use crate::error::XtrError;
 use crate::inbound::{codec, dom};
@@ -170,6 +170,7 @@ fn judge(
     message: &str,
     direction: &str,
     violations: &[Violation],
+    limit: &LogLimit,
 ) -> Option<Response> {
     if violations.is_empty() {
         return None;
@@ -179,11 +180,17 @@ fn judge(
         .iter()
         .map(|v| format!("{}:{}", v.path, v.code))
         .collect();
+    // The log is rate capped per lane. The answer is not.
+    let log = limit.check();
     if mode == ValidateMode::Enforce {
-        tracing::warn!(group, name, msg_type = message, direction, violations = ?summary, "XSD validation refused the message");
+        if let Some(suppressed) = log {
+            tracing::warn!(group, name, msg_type = message, direction, violations = ?summary, suppressed, "XSD validation refused the message");
+        }
         Some(schema_invalid(violations))
     } else {
-        tracing::warn!(group, name, msg_type = message, direction, violations = ?summary, "XSD validation (report): the message does not conform");
+        if let Some(suppressed) = log {
+            tracing::warn!(group, name, msg_type = message, direction, violations = ?summary, suppressed, "XSD validation (report): the message does not conform");
+        }
         None
     }
 }
@@ -311,6 +318,7 @@ async fn handle_inbound(
                 &root.local,
                 "inbound",
                 &v,
+                &svc.log_limit,
             ) {
                 return resp;
             }
@@ -503,6 +511,7 @@ async fn call_outbound(
                 message,
                 "outbound",
                 &v,
+                &svc.log_limit,
             ) {
                 return Ok(resp);
             }
