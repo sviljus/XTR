@@ -947,7 +947,7 @@ fn mutate(x: &str, cap: usize) -> Vec<String> {
         }
         out.push(format!(
             "{} zz=\"1\"{}",
-            &x[..te - 1].trim_end_matches('/'),
+            x[..te - 1].trim_end_matches('/'),
             &x[te - 1..]
         ));
     }
