@@ -1159,7 +1159,7 @@ async fn inbound_refuses_prolog_forms_that_hide_or_break_the_declaration() {
         assert_eq!(st, StatusCode::BAD_REQUEST, "{name}: {body}");
     }
     // UTF-16LE without BOM and without declaration: NUL bytes, not XML.
-    let utf16: Vec<u8> = root.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
+    let utf16: Vec<u8> = root.encode_utf16().flat_map(u16::to_le_bytes).collect();
     let req = Request::post("/xml-in/erru/msg")
         .body(Body::from(utf16))
         .unwrap();

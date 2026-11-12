@@ -48,7 +48,7 @@ fn files_limited(root: &Path, limit: usize) -> Result<Vec<PathBuf>, String> {
             if p.is_dir() {
                 let hidden = p
                     .file_name()
-                    .and_then(|n| n.to_str())
+                    .and_then(std::ffi::OsStr::to_str)
                     .is_some_and(|n| n.starts_with('.'));
                 if !hidden
                     && p.canonicalize()

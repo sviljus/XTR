@@ -80,7 +80,7 @@ impl XmlSidecar {
         let own = self
             .messages
             .get(message)
-            .and_then(|m| m.as_ref())
+            .and_then(Option::as_ref)
             .and_then(|c| c.backend.clone());
         own.or_else(|| {
             let base = self.inbound.as_ref()?.backend.as_deref()?;
@@ -407,6 +407,31 @@ fn http_url(what: &str, url: &str) -> Result<(), String> {
 }
 
 fn prepare(root: &Path, sidecar: &Path, cfg: &AppConfig) -> Result<XmlService, String> {
+    let sc = load_sidecar(sidecar)?;
+    let (group, name) = lane_id(root, sidecar)?;
+
+    let dir = sidecar.parent().unwrap_or(root);
+    let loader = contract::fs_loader(dir);
+    let entries = schema_entries(&sc, &loader)?;
+    let (schema, _files) = contract::load_xsd(&entries, &loader)?;
+
+    let messages = resolve_messages(&sc, &schema)?;
+    check_directions(&sc, &messages)?;
+    check_inbound(&sc, &messages)?;
+    let http = build_outbound(&sc, &messages, cfg)?;
+
+    Ok(XmlService {
+        group,
+        name,
+        schema,
+        messages,
+        sidecar: sc,
+        http,
+    })
+}
+
+/// Reads and parses a sidecar and checks its top-level shape.
+fn load_sidecar(sidecar: &Path) -> Result<XmlSidecar, String> {
     let sc_text = fs::read_to_string(sidecar).map_err(|e| format!("reading sidecar: {e}"))?;
     let sc: XmlSidecar =
         serde_yaml_ng::from_str(&sc_text).map_err(|e| format!("invalid sidecar: {e}"))?;
@@ -419,8 +444,13 @@ fn prepare(root: &Path, sidecar: &Path, cfg: &AppConfig) -> Result<XmlService, S
     if sc.messages.is_empty() {
         return Err("`messages:` must list at least one message".into());
     }
+    Ok(sc)
+}
 
-    // group / name from the path, like the SOAP lanes.
+/// `(group, name)` of a lane from the path of its sidecar, like the SOAP
+/// lanes: the first directory under `root` is the group, deeper
+/// directories join the name with `-`.
+fn lane_id(root: &Path, sidecar: &Path) -> Result<(String, String), String> {
     let rel: Vec<String> = sidecar
         .parent()
         .and_then(|p| p.strip_prefix(root).ok())
@@ -432,21 +462,24 @@ fn prepare(root: &Path, sidecar: &Path, cfg: &AppConfig) -> Result<XmlService, S
         .unwrap_or_default();
     let file = sidecar
         .file_name()
-        .and_then(|n| n.to_str())
+        .and_then(std::ffi::OsStr::to_str)
         .ok_or("sidecar file name is not UTF-8")?;
     let stem = file
         .strip_suffix(".xml.yaml")
         .or_else(|| file.strip_suffix(".xml.yml"))
         .ok_or("sidecar must be named <name>.xml.yaml")?;
-    let (group, name) = match rel.as_slice() {
-        [] => return Err("a .xml.yaml sidecar must live in a <group>/ subdirectory".into()),
-        [g] => (g.clone(), stem.to_string()),
-        [g, rest @ ..] => (g.clone(), format!("{}-{stem}", rest.join("-"))),
-    };
+    match rel.as_slice() {
+        [] => Err("a .xml.yaml sidecar must live in a <group>/ subdirectory".into()),
+        [g] => Ok((g.clone(), stem.to_string())),
+        [g, rest @ ..] => Ok((g.clone(), format!("{}-{stem}", rest.join("-")))),
+    }
+}
 
-    // Schema.
-    let dir = sidecar.parent().unwrap_or(root);
-    let loader = contract::fs_loader(dir);
+/// Loads the entry XSD files that the sidecar lists, as `(file name, text)`.
+fn schema_entries(
+    sc: &XmlSidecar,
+    loader: &contract::SchemaLoader,
+) -> Result<Vec<(String, String)>, String> {
     let mut entries = Vec::new();
     for s in &sc.schemas {
         if s.contains(['/', '\\']) {
@@ -459,9 +492,11 @@ fn prepare(root: &Path, sidecar: &Path, cfg: &AppConfig) -> Result<XmlService, S
         })?;
         entries.push((fname, xml));
     }
-    let (schema, _files) = contract::load_xsd(&entries, &loader)?;
+    Ok(entries)
+}
 
-    // Messages → global elements.
+/// Maps each message of the sidecar to a global element of the schemas.
+fn resolve_messages(sc: &XmlSidecar, schema: &Schema) -> Result<BTreeMap<String, Message>, String> {
     let mut messages = BTreeMap::new();
     for (m, mc) in &sc.messages {
         let same_local = schema.elements.keys().filter(|q| &q.local == m).count();
@@ -481,11 +516,14 @@ fn prepare(root: &Path, sidecar: &Path, cfg: &AppConfig) -> Result<XmlService, S
             },
         );
     }
+    Ok(messages)
+}
 
-    // Directions must match the sections the sidecar has.
+/// The direction of each message must match the sections the sidecar has.
+fn check_directions(sc: &XmlSidecar, messages: &BTreeMap<String, Message>) -> Result<(), String> {
     let any_in = messages.values().any(|m| m.cfg.direction.inbound());
     let any_out = messages.values().any(|m| m.cfg.direction.outbound());
-    for (m, msg) in &messages {
+    for (m, msg) in messages {
         let d = msg.cfg.direction;
         if d.inbound() && !d.outbound() && sc.inbound.is_none() {
             return Err(format!(
@@ -504,132 +542,146 @@ fn prepare(root: &Path, sidecar: &Path, cfg: &AppConfig) -> Result<XmlService, S
     if sc.outbound.is_some() && !any_out {
         return Err("`outbound:` is set but every message is `direction: in`".into());
     }
+    Ok(())
+}
 
-    // Inbound checks.
-    if let Some(ib) = &sc.inbound {
-        if !(200..300).contains(&ib.success_status) {
-            return Err(format!(
-                "inbound.success_status {} must be a 2xx code",
-                ib.success_status
-            ));
-        }
-        if let Some(p) = &ib.path {
-            let bad = !p.starts_with('/')
-                || p.len() < 2
-                || p.contains(['{', '}', ':', '*', '?', '#', ' '])
-                || RESERVED_PATHS
-                    .iter()
-                    .any(|r| p.trim_end_matches('/') == *r || p.starts_with(&format!("{r}/")));
-            if bad {
-                return Err(format!(
-                    "inbound.path {p:?} must be a literal absolute path that does not use a reserved prefix"
-                ));
-            }
-        }
-        if ib.relay_statuses.iter().any(|c| !(400..500).contains(c)) {
-            return Err("inbound.relay_statuses must only contain 4xx codes".into());
-        }
-        for (m, msg) in &messages {
-            if !msg.cfg.direction.inbound() {
-                if msg.cfg.backend.is_some() || msg.cfg.forward.is_some() {
-                    return Err(format!(
-                        "message {m}: `backend`/`forward` cannot apply to a `direction: out` message"
-                    ));
-                }
-                continue;
-            }
-            if let Some(f) = &msg.cfg.forward {
-                http_url("forward URL", f)?;
-                if msg.cfg.backend.is_some() {
-                    return Err(format!(
-                        "message {m}: set either `forward` or `backend`, not both"
-                    ));
-                }
-                continue;
-            }
-            let url = sc.backend_for(m).ok_or_else(|| {
-                format!("message {m} has no backend (set inbound.backend or messages.{m}.backend)")
-            })?;
-            http_url("backend URL", &url)?;
-        }
-    } else {
-        for (m, msg) in &messages {
+/// Checks the `inbound:` section and the backend / forward settings.
+fn check_inbound(sc: &XmlSidecar, messages: &BTreeMap<String, Message>) -> Result<(), String> {
+    let Some(ib) = &sc.inbound else {
+        for (m, msg) in messages {
             if msg.cfg.backend.is_some() || msg.cfg.forward.is_some() {
                 return Err(format!(
                     "message {m}: `backend`/`forward` need an `inbound:` section"
                 ));
             }
         }
-    }
-
-    // Outbound checks + client.
-    let http = match &sc.outbound {
-        None => {
-            for (m, msg) in &messages {
-                if msg.cfg.url.is_some() || msg.cfg.timeout_secs.is_some() {
-                    return Err(format!(
-                        "message {m}: `url`/`timeout_secs` need an `outbound:` section"
-                    ));
-                }
-            }
-            None
-        }
-        Some(ob) => {
-            let limit = cfg.limits.request_timeout_secs;
-            let mut seen_url = None;
-            for (m, mc) in &sc.messages {
-                let dir = messages[m].cfg.direction;
-                if !dir.outbound() {
-                    if mc
-                        .as_ref()
-                        .is_some_and(|c| c.url.is_some() || c.timeout_secs.is_some())
-                    {
-                        return Err(format!(
-                            "message {m}: `url`/`timeout_secs` cannot apply to a `direction: in` message"
-                        ));
-                    }
-                    continue;
-                }
-                let url = mc
-                    .as_ref()
-                    .and_then(|c| c.url.clone())
-                    .or_else(|| ob.url.clone())
-                    .ok_or_else(|| {
-                        format!(
-                            "message {m} has no peer URL (set outbound.url or messages.{m}.url)"
-                        )
-                    })?;
-                // Same SSRF guard as WSDL-declared URLs.
-                crate::wsdl::url_guard::validate_upstream_url(&url, &cfg.wsdl)
-                    .map_err(|e| format!("message {m}: {e}"))?;
-                seen_url.get_or_insert(url);
-                let t = mc.as_ref().and_then(|c| c.timeout_secs).or(ob.timeout_secs);
-                if let Some(t) = t {
-                    if t == 0 || t > limit {
-                        return Err(format!(
-                            "message {m}: timeout_secs {t} must be 1..={limit} (limits.request_timeout_secs)"
-                        ));
-                    }
-                }
-            }
-            if ob.content_type.trim().is_empty()
-                || !ob.content_type.is_ascii()
-                || reqwest::header::HeaderValue::from_str(&ob.content_type).is_err()
-            {
-                return Err("outbound.content_type is empty or not a valid header value".into());
-            }
-            Some(build_http(ob, seen_url.unwrap_or_default(), cfg)?)
-        }
+        return Ok(());
     };
+    if !(200..300).contains(&ib.success_status) {
+        return Err(format!(
+            "inbound.success_status {} must be a 2xx code",
+            ib.success_status
+        ));
+    }
+    if let Some(p) = &ib.path {
+        check_inbound_path(p)?;
+    }
+    if ib.relay_statuses.iter().any(|c| !(400..500).contains(c)) {
+        return Err("inbound.relay_statuses must only contain 4xx codes".into());
+    }
+    for (m, msg) in messages {
+        check_message_target(sc, m, msg)?;
+    }
+    Ok(())
+}
 
-    Ok(XmlService {
-        group,
-        name,
-        schema,
-        messages,
-        sidecar: sc,
-        http,
-    })
+/// `inbound.path` must be a literal absolute path outside the reserved prefixes.
+fn check_inbound_path(p: &str) -> Result<(), String> {
+    let bad = !p.starts_with('/')
+        || p.len() < 2
+        || p.contains(['{', '}', ':', '*', '?', '#', ' '])
+        || RESERVED_PATHS
+            .iter()
+            .any(|r| p.trim_end_matches('/') == *r || p.starts_with(&format!("{r}/")));
+    if bad {
+        return Err(format!(
+            "inbound.path {p:?} must be a literal absolute path that does not use a reserved prefix"
+        ));
+    }
+    Ok(())
+}
+
+/// The backend or forward target of one inbound message.
+fn check_message_target(sc: &XmlSidecar, m: &str, msg: &Message) -> Result<(), String> {
+    if !msg.cfg.direction.inbound() {
+        if msg.cfg.backend.is_some() || msg.cfg.forward.is_some() {
+            return Err(format!(
+                "message {m}: `backend`/`forward` cannot apply to a `direction: out` message"
+            ));
+        }
+        return Ok(());
+    }
+    if let Some(f) = &msg.cfg.forward {
+        http_url("forward URL", f)?;
+        if msg.cfg.backend.is_some() {
+            return Err(format!(
+                "message {m}: set either `forward` or `backend`, not both"
+            ));
+        }
+        return Ok(());
+    }
+    let url = sc.backend_for(m).ok_or_else(|| {
+        format!("message {m} has no backend (set inbound.backend or messages.{m}.backend)")
+    })?;
+    http_url("backend URL", &url)
+}
+
+/// Checks the `outbound:` section and builds the HTTP client for it.
+fn build_outbound(
+    sc: &XmlSidecar,
+    messages: &BTreeMap<String, Message>,
+    cfg: &AppConfig,
+) -> Result<Option<reqwest::Client>, String> {
+    let Some(ob) = &sc.outbound else {
+        for (m, msg) in messages {
+            if msg.cfg.url.is_some() || msg.cfg.timeout_secs.is_some() {
+                return Err(format!(
+                    "message {m}: `url`/`timeout_secs` need an `outbound:` section"
+                ));
+            }
+        }
+        return Ok(None);
+    };
+    let mut seen_url = None;
+    for (m, mc) in &sc.messages {
+        if !messages[m].cfg.direction.outbound() {
+            if mc
+                .as_ref()
+                .is_some_and(|c| c.url.is_some() || c.timeout_secs.is_some())
+            {
+                return Err(format!(
+                    "message {m}: `url`/`timeout_secs` cannot apply to a `direction: in` message"
+                ));
+            }
+            continue;
+        }
+        let url = check_peer_target(m, mc.as_ref(), ob, cfg)?;
+        seen_url.get_or_insert(url);
+    }
+    if ob.content_type.trim().is_empty()
+        || !ob.content_type.is_ascii()
+        || reqwest::header::HeaderValue::from_str(&ob.content_type).is_err()
+    {
+        return Err("outbound.content_type is empty or not a valid header value".into());
+    }
+    Ok(Some(build_http(ob, seen_url.unwrap_or_default(), cfg)?))
+}
+
+/// Peer URL (SSRF guard) and timeout of one outbound message. Returns the URL.
+fn check_peer_target(
+    m: &str,
+    mc: Option<&MessageCfg>,
+    ob: &XmlOutbound,
+    cfg: &AppConfig,
+) -> Result<String, String> {
+    let url = mc
+        .and_then(|c| c.url.clone())
+        .or_else(|| ob.url.clone())
+        .ok_or_else(|| {
+            format!("message {m} has no peer URL (set outbound.url or messages.{m}.url)")
+        })?;
+    // Same SSRF guard as WSDL-declared URLs.
+    crate::wsdl::url_guard::validate_upstream_url(&url, &cfg.wsdl)
+        .map_err(|e| format!("message {m}: {e}"))?;
+    let limit = cfg.limits.request_timeout_secs;
+    if let Some(t) = mc.and_then(|c| c.timeout_secs).or(ob.timeout_secs) {
+        if t == 0 || t > limit {
+            return Err(format!(
+                "message {m}: timeout_secs {t} must be 1..={limit} (limits.request_timeout_secs)"
+            ));
+        }
+    }
+    Ok(url)
 }
 
 fn build_http(
