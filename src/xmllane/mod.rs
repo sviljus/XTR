@@ -350,6 +350,65 @@ fn sidecar_files(root: &Path) -> Result<Vec<PathBuf>, String> {
         .collect())
 }
 
+/// Lanes whose served direction does not enforce XSD validation, as
+/// `group/name inbound=report` lines — reads the sidecars only, for
+/// `xtr doctor`. Lanes that do not parse are skipped; boot refuses them.
+pub fn weak_validation(dir: Option<&Path>) -> Vec<String> {
+    let mut out = Vec::new();
+    let Some(root) = dir.filter(|d| d.is_dir()) else {
+        return out;
+    };
+    let Ok(files) = sidecar_files(root) else {
+        return out;
+    };
+    for sc in files {
+        let Ok(text) = fs::read_to_string(&sc) else {
+            continue;
+        };
+        let Ok(x) = serde_yaml_ng::from_str::<XmlSidecar>(&text) else {
+            continue;
+        };
+        let rel: Vec<String> = sc
+            .parent()
+            .and_then(|p| p.strip_prefix(root).ok())
+            .map(|p| {
+                p.components()
+                    .filter_map(|c| c.as_os_str().to_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let file = sc.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        let stem = file
+            .strip_suffix(".xml.yaml")
+            .or_else(|| file.strip_suffix(".xml.yml"))
+            .unwrap_or(file);
+        let lane = match rel.as_slice() {
+            [] => stem.to_string(),
+            [g] => format!("{g}/{stem}"),
+            [g, rest @ ..] => format!("{g}/{}-{stem}", rest.join("-")),
+        };
+        let mut weak = Vec::new();
+        for (served, name, mode) in [
+            (x.inbound.is_some(), "inbound", x.validate.inbound),
+            (x.outbound.is_some(), "outbound", x.validate.outbound),
+        ] {
+            if served && mode != ValidateMode::Enforce {
+                let m = if mode == ValidateMode::Off {
+                    "off"
+                } else {
+                    "report"
+                };
+                weak.push(format!("{name}={m}"));
+            }
+        }
+        if !weak.is_empty() {
+            out.push(format!("{lane} {}", weak.join(" ")));
+        }
+    }
+    out.sort();
+    out
+}
+
 /// How many raw-XML sidecars under `dir` enable each lane — reads and
 /// parses the YAML only (no XSDs, keystores or clients), for
 /// `xtr doctor`. Unparseable sidecars are skipped here; boot refuses them.

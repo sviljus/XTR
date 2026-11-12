@@ -90,8 +90,35 @@ pub fn run(cfg: &AppConfig, cfg_path: Option<&Path>) -> Vec<Finding> {
     check_soap_action_missing(cfg, &mut findings);
     check_inter_service_token(&mut findings);
     check_soap_lanes_exposure(cfg, &mut findings);
+    check_xml_lane_validation(cfg, &mut findings);
     add_context_info(cfg, cfg_path, &mut findings);
     findings
+}
+
+/// Raw-XML lanes whose served direction does not enforce XSD validation.
+/// `report` and `off` let a message through that breaks the XSD.
+fn check_xml_lane_validation(cfg: &AppConfig, out: &mut Vec<Finding>) {
+    let weak = crate::xmllane::weak_validation(cfg.wsdl_watch_dir.as_deref());
+    if weak.is_empty() {
+        return;
+    }
+    out.push(Finding {
+        severity: Severity::Weak,
+        code: "weak-xml-lane-validation-not-enforced".into(),
+        field: Some("validate".into()),
+        headline: "A raw-XML lane does not enforce XSD validation".into(),
+        rationale: format!(
+            "The ERRU XML Message Reference requires that the receiver validates\n\
+             a message against its XSD. With `report` or `off`, a message that\n\
+             breaks the XSD reaches the backend or the peer.\n\nLanes:\n  {}",
+            weak.join("\n  ")
+        ),
+        recovery: Some(
+            "Remove the `validate:` key of the lane, or set the direction to\n\
+             `enforce`. Use `report` only in a test environment, for a limited time."
+                .into(),
+        ),
+    });
 }
 
 /// Schema-aware SOAP lanes (`.soap.yaml` sidecars). `/soap-in/` must be
