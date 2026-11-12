@@ -233,13 +233,45 @@ fn is_xml_space(s: &str) -> bool {
     s.chars().all(|c| matches!(c, ' ' | '\t' | '\r' | '\n'))
 }
 
+/// Counts line ends incrementally: each call looks only at the bytes
+/// after the last position, so a whole document costs one pass.
+/// A line end is LF, CRLF or a lone CR (XML 1.0 section 2.11).
+struct LineCounter {
+    pos: usize,
+    line: u32,
+}
+
+impl LineCounter {
+    fn new() -> Self {
+        Self { pos: 0, line: 1 }
+    }
+
+    /// Line (from 1) at byte offset `to`. `to` must not go backwards.
+    fn at(&mut self, bytes: &[u8], to: usize) -> u32 {
+        let to = to.min(bytes.len());
+        for i in self.pos..to {
+            match bytes[i] {
+                b'\n' => self.line = self.line.saturating_add(1),
+                b'\r' if bytes.get(i + 1) != Some(&b'\n') => {
+                    self.line = self.line.saturating_add(1)
+                }
+                _ => {}
+            }
+        }
+        self.pos = self.pos.max(to);
+        self.line
+    }
+}
+
 fn parse_impl(xml: &str, strict: bool) -> Result<Element, DomError> {
     let mut first = true;
+    let mut lines = LineCounter::new();
     let mut reader = Reader::from_str(xml);
     let mut stack: Vec<Element> = Vec::new();
     let mut root: Option<Element> = None;
     let empty_scope: Scope = Arc::new(Vec::new());
     loop {
+        let start = reader.buffer_position() as usize;
         let ev = reader
             .read_event()
             .map_err(|e| err(format!("XML parse error: {e}")))?;
@@ -253,14 +285,17 @@ fn parse_impl(xml: &str, strict: bool) -> Result<Element, DomError> {
                     .last()
                     .map(|p| p.scope.clone())
                     .unwrap_or_else(|| empty_scope.clone());
-                stack.push(open_element(&e, parent_scope)?);
+                let mut el = open_element(&e, parent_scope)?;
+                el.line = lines.at(xml.as_bytes(), start);
+                stack.push(el);
             }
             Event::Empty(e) => {
                 let parent_scope = stack
                     .last()
                     .map(|p| p.scope.clone())
                     .unwrap_or_else(|| empty_scope.clone());
-                let el = open_element(&e, parent_scope)?;
+                let mut el = open_element(&e, parent_scope)?;
+                el.line = lines.at(xml.as_bytes(), start);
                 attach(&mut stack, &mut root, el)?;
             }
             Event::End(_) => {
@@ -602,6 +637,13 @@ mod tests {
         let got = lines("<a\n  x=\"1\"\n  y=\"2\">\n<b\n  z=\"3\"/>\n<c/></a>");
         let n: Vec<(&str, u32)> = got.iter().map(|(n, l)| (n.as_str(), *l)).collect();
         assert_eq!(n, [("a", 1), ("b", 4), ("c", 6)]);
+    }
+
+    #[test]
+    fn a_character_reference_for_a_line_feed_is_not_a_line_end() {
+        let got = lines("<a x=\"p&#10;q\">&#10;<b/></a>");
+        let n: Vec<(&str, u32)> = got.iter().map(|(n, l)| (n.as_str(), *l)).collect();
+        assert_eq!(n, [("a", 1), ("b", 1)]);
     }
 
     #[test]
