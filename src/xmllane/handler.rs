@@ -197,7 +197,7 @@ async fn handle_inbound(
     };
     let root = match dom::parse_message(text) {
         Ok(r) => r,
-        Err(e) if e.0.starts_with(dom::ENCODING_ERROR) => {
+        Err(e) if e.1 == dom::DomErrorKind::Encoding => {
             return err(
                 StatusCode::BAD_REQUEST,
                 "unsupported_encoding",

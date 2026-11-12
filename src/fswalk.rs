@@ -5,7 +5,9 @@
 //!   path, so a symlink cycle (`loop -> .`) adds nothing.
 //! * A symlink to a directory is followed only when the target is inside the
 //!   root. A link out of the root (`x -> /`, `x -> ../../other`) is ignored.
-//! * The walk stops after [`MAX_ENTRIES`] directories and files.
+//! * A symlink to a file is listed only when the target is inside the root.
+//! * The walk fails when it reads more than [`MAX_ENTRIES`] directories and
+//!   files. A partial list would drop lanes without notice.
 //! * Symlinks to files and to directories inside the root still work. Kubernetes volume mounts
 //!   use them.
 //! * A directory whose name starts with `.` is skipped. This covers the
@@ -19,11 +21,16 @@ use std::path::{Path, PathBuf};
 pub const MAX_ENTRIES: usize = 50_000;
 
 /// All files under `root`, sorted. The result has no path twice.
-pub fn files(root: &Path) -> Vec<PathBuf> {
+/// `Err` when the walk reads more than [`MAX_ENTRIES`] entries.
+pub fn files(root: &Path) -> Result<Vec<PathBuf>, String> {
+    files_limited(root, MAX_ENTRIES)
+}
+
+fn files_limited(root: &Path, limit: usize) -> Result<Vec<PathBuf>, String> {
     let mut out = Vec::new();
     let mut seen: HashSet<PathBuf> = HashSet::new();
     let Ok(canonical_root) = root.canonicalize() else {
-        return out;
+        return Ok(out);
     };
     seen.insert(canonical_root.clone());
     let mut stack = vec![root.to_path_buf()];
@@ -32,10 +39,11 @@ pub fn files(root: &Path) -> Vec<PathBuf> {
             continue;
         };
         for p in rd.flatten().map(|e| e.path()) {
-            if out.len() + seen.len() > MAX_ENTRIES {
-                tracing::warn!(root = %root.display(), "directory walk stopped: too many entries");
-                out.sort();
-                return out;
+            if out.len() + seen.len() > limit {
+                return Err(format!(
+                    "{}: more than {limit} directories and files; remove what is not a lane",
+                    root.display()
+                ));
             }
             if p.is_dir() {
                 let hidden = p
@@ -48,13 +56,23 @@ pub fn files(root: &Path) -> Vec<PathBuf> {
                 {
                     stack.push(p);
                 }
+            } else if p
+                .symlink_metadata()
+                .is_ok_and(|m| m.file_type().is_symlink())
+            {
+                // A link to a file: keep it only when the target is a file inside the root.
+                if p.canonicalize()
+                    .is_ok_and(|c| c.is_file() && c.starts_with(&canonical_root))
+                {
+                    out.push(p);
+                }
             } else {
                 out.push(p);
             }
         }
     }
     out.sort();
-    out
+    Ok(out)
 }
 
 #[cfg(all(test, unix))]
@@ -69,6 +87,7 @@ mod tests {
 
     fn names(root: &Path) -> Vec<String> {
         files(root)
+            .unwrap()
             .iter()
             .map(|p| p.strip_prefix(root).unwrap().display().to_string())
             .collect()
@@ -131,6 +150,16 @@ mod tests {
         touch(&d.path().join("g/a.yaml"));
         symlink("/", d.path().join("g/everything")).unwrap();
         assert_eq!(names(d.path()), ["g/a.yaml"]);
+    }
+
+    #[test]
+    fn too_many_entries_is_an_error_not_a_partial_list() {
+        let d = tempfile::tempdir().unwrap();
+        for i in 0..20 {
+            touch(&d.path().join(format!("g/f{i}.yaml")));
+        }
+        assert!(files_limited(d.path(), 10).is_err());
+        assert_eq!(files_limited(d.path(), 100).unwrap().len(), 20);
     }
 
     #[test]

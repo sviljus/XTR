@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Sidecar and WSDL discovery no longer follows a symlink that points outside the watch
+  directory (a link to a directory or to a file). A link inside the directory still works. The
+  discovery fails at boot when it reads more than 50 000 directories and files. (#43)
+
 ### Fixed
 - Sidecar and WSDL discovery (`inbound`, `xmllane`, `xtr doctor`) uses one shared walk. It enters each
   directory once (by canonical path) and follows a symlink only inside the root, so a symlink cycle or a link out of the root no longer creates phantom lanes or stalls boot.

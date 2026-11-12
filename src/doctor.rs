@@ -218,7 +218,9 @@ fn check_soap_lanes_exposure(cfg: &AppConfig, out: &mut Vec<Finding>) {
 /// WSDLs under the watch dir that boot will turn into DSL endpoints
 /// (every `*.wsdl` unless its `.soap.yaml` says `dsl: false`).
 fn count_dsl_generating_wsdls(dir: &Path) -> usize {
+    // An error here is a walk over the limit; boot refuses it, doctor counts 0.
     crate::fswalk::files(dir)
+        .unwrap_or_default()
         .iter()
         .filter(|p| {
             p.extension()

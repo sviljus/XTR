@@ -1041,7 +1041,7 @@ async fn inbound_refuses_a_declared_encoding_other_than_utf8() {
         r#"<?xml version="1.0" encoding="ISO-8859-1"?>"#,
         r#"<?xml version="1.0" encoding="UTF-16"?>"#,
         r#"<?xml version='1.0' encoding='windows-1252'?>"#,
-        r#"<?xml version="1.0" standalone="yes" encoding = "latin1" ?>"#,
+        r#"<?xml version="1.0" encoding = "latin1" standalone="yes" ?>"#,
     ] {
         let (st, body, _) = call(&env.app, xml_post("/xml-in/erru/msg", &with_decl(decl))).await;
         assert_eq!(st, StatusCode::BAD_REQUEST, "{decl}: {body}");

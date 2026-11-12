@@ -311,14 +311,14 @@ pub struct Check {
     pub problems: Vec<Problem>,
 }
 
-fn sidecar_files(root: &Path) -> Vec<PathBuf> {
-    crate::fswalk::files(root)
+fn sidecar_files(root: &Path) -> Result<Vec<PathBuf>, String> {
+    Ok(crate::fswalk::files(root)?
         .into_iter()
         .filter(|p| {
             let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
             name.ends_with(".soap.yaml") || name.ends_with(".soap.yml")
         })
-        .collect()
+        .collect())
 }
 
 /// `wsdl/g/x.soap.yaml` → `wsdl/g/x.wsdl` (or `.WSDL`).
@@ -345,7 +345,18 @@ pub fn check_all(dir: Option<&Path>, cfg: &AppConfig) -> Check {
     // (group, xsd file name) → canonical path: `/soap-in/<group>/<file>.xsd`
     // is one URL per group, so two different files must not share it.
     let mut xsds: BTreeMap<(String, String), PathBuf> = BTreeMap::new();
-    for sc in sidecar_files(root) {
+    let sidecars = match sidecar_files(root) {
+        Ok(v) => v,
+        Err(message) => {
+            check.problems.push(Problem {
+                kind: ProblemKind::SidecarInvalid,
+                file: root.to_path_buf(),
+                message,
+            });
+            return check;
+        }
+    };
+    for sc in sidecars {
         let problem = |kind, message: String| Problem {
             kind,
             file: sc.clone(),
@@ -452,7 +463,7 @@ pub fn load_all(dir: Option<&Path>, cfg: &AppConfig) -> Result<Registry, String>
     let Some(root) = dir.filter(|d| d.is_dir()) else {
         return Ok(reg);
     };
-    for sc in sidecar_files(root) {
+    for sc in sidecar_files(root)? {
         let wsdl = wsdl_for_sidecar(&sc).ok_or("sidecar without WSDL")?;
         let prepared = prepare(root, &wsdl, &sc)?;
         let outbound = match &prepared.sidecar.outbound {

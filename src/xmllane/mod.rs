@@ -302,14 +302,14 @@ const RESERVED_PATHS: [&str; 6] = [
     "/xml-out",
 ];
 
-fn sidecar_files(root: &Path) -> Vec<PathBuf> {
-    crate::fswalk::files(root)
+fn sidecar_files(root: &Path) -> Result<Vec<PathBuf>, String> {
+    Ok(crate::fswalk::files(root)?
         .into_iter()
         .filter(|p| {
             let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
             name.ends_with(".xml.yaml") || name.ends_with(".xml.yml")
         })
-        .collect()
+        .collect())
 }
 
 /// How many raw-XML sidecars under `dir` enable each lane — reads and
@@ -323,7 +323,10 @@ pub fn count_lanes(dir: Option<&Path>) -> crate::inbound::LaneSummary {
     let Some(root) = dir.filter(|d| d.is_dir()) else {
         return sum;
     };
-    for sc in sidecar_files(root) {
+    let Ok(files) = sidecar_files(root) else {
+        return sum; // boot refuses this directory
+    };
+    for sc in files {
         let Ok(text) = fs::read_to_string(&sc) else {
             continue;
         };
@@ -345,7 +348,7 @@ pub fn load_all(dir: Option<&Path>, cfg: &AppConfig) -> Result<XmlRegistry, Stri
     };
     let mut problems = Vec::new();
     let mut paths: BTreeMap<String, PathBuf> = BTreeMap::new();
-    for sc in sidecar_files(root) {
+    for sc in sidecar_files(root)? {
         match prepare(root, &sc, cfg) {
             Ok(svc) => {
                 let key = (svc.group.clone(), svc.name.clone());
