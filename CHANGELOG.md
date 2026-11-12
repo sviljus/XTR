@@ -27,7 +27,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the line. `xtr doctor` reports `off` and `report` as WEAK. Existing lanes validate from now on.
   Set `validate: {inbound: off, outbound: off}` to keep the old behavior. Until a differential
   test against a second XSD processor shows no differences for your schemas, write
-  `validate: report` in the sidecar of a production lane.
+  `validate: report` in the sidecar of a production lane. Boot logs the validation mode of each lane.
+  The warn log of violations is rate capped per lane (10 entries per minute, with a `suppressed`
+  count).
 - Raw-XML inbound refuses an XML declaration whose `encoding` is not UTF-8 or utf8
   (HTTP 400 `unsupported_encoding`), also before `forward`, and a prolog that is not well-formed
   (`malformed_xml`). The checks are in the parser (`dom::parse_message`). Docs: the `sha256`

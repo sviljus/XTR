@@ -274,6 +274,18 @@ production lane. Then the choice is written down and visible. Move to `enforce`
 when the differential test shows no differences for your schemas and the logs
 show no unexpected violations.
 
+**Roll out.** Before you roll out a version with validation, add
+`validate: report` to every raw-XML sidecar. Run `xtr doctor` of the new
+version on the sidecar directory. It must list every raw-XML lane with
+`report`. Then roll out, and switch one lane at a time to `enforce` after the
+conditions above are met.
+
+**Logs.** Boot logs the validation mode of each lane at info level. A violation
+writes a warn entry with the element paths and the rule codes, never a value.
+The log is rate capped per lane: at most 10 entries per minute. The first
+entry of the next minute has a `suppressed` count of the entries that XTR
+dropped. The answer to the sender is not capped.
+
 **Inbound.** XTR validates the message before it calls the backend and
 before `forward`. A message that breaks the XSD gets HTTP 422
 `schema_invalid`. XTR does not call the backend or forward the message.
