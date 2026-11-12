@@ -114,6 +114,17 @@ mod tests {
         assert_eq!(names(&root), ["g/a.yaml"]);
     }
 
+    /// A file symlink out of the root is not listed (its content is not ours).
+    #[test]
+    fn a_file_symlink_out_of_the_root_is_not_listed() {
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path().join("wsdl");
+        touch(&root.join("g/a.yaml"));
+        touch(&d.path().join("secret.yaml"));
+        symlink("../../secret.yaml", root.join("g/stolen.yaml")).unwrap();
+        assert_eq!(names(&root), ["g/a.yaml"]);
+    }
+
     #[test]
     fn a_symlink_to_the_filesystem_root_is_not_followed() {
         let d = tempfile::tempdir().unwrap();
