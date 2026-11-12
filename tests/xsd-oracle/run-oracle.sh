@@ -12,8 +12,9 @@ cache=${XTR_ORACLE_CACHE:-$here/.cache}
 jar="$cache/xercesImpl-$XERCES_VERSION.jar"
 
 sha256() {
-  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1
-  else shasum -a 256 "$1" | cut -d' ' -f1; fi
+  f=$1
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$f" | cut -d' ' -f1
+  else shasum -a 256 "$f" | cut -d' ' -f1; fi
 }
 
 command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1 || { echo "run-oracle: Docker is not available" >&2; exit 10; }
