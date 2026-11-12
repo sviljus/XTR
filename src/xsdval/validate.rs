@@ -200,6 +200,7 @@ impl Walk {
                     kids: &kids,
                     segs: &segs,
                     loc,
+                    line: el.line,
                 };
                 self.particle(p, &mut m, &mut pos, path)
             }
@@ -239,7 +240,7 @@ impl Walk {
             self.unexpected(m.kids, m.segs, pos, m.loc, path);
         } else {
             let loc = decl.map_or(m.loc, |d| &d.loc);
-            self.add(path, "element_missing", 0, loc);
+            self.add(path, "element_missing", m.line, loc);
         }
     }
 
@@ -355,6 +356,8 @@ struct Match<'k, 'a> {
     kids: &'k [&'a Element],
     segs: &'k [Option<u32>],
     loc: &'k SrcLoc,
+    /// Line of the parent element in the message.
+    line: u32,
 }
 
 fn is_space(s: &str) -> bool {
@@ -514,7 +517,8 @@ fn parse_dt(v: &str, with_time: bool) -> Option<Dt> {
         None => (false, v),
     };
     let ylen = rest.bytes().take_while(u8::is_ascii_digit).count();
-    if ylen < 4 || (ylen > 4 && rest.starts_with('0')) {
+    // At most nine digits: the calendar arithmetic stays far from overflow.
+    if !(4..=9).contains(&ylen) || (ylen > 4 && rest.starts_with('0')) {
         return None;
     }
     let year: i64 = rest[..ylen].parse().ok()?;

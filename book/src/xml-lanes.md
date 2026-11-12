@@ -267,6 +267,12 @@ A missing key means `enforce`.
 Use `report` only in a test environment and for a limited time. `xtr doctor`
 reports a lane with `off` or `report` as WEAK.
 
+An existing lane validates from this version on, because a missing key means
+`enforce`. Until a differential test against a second XSD processor shows no
+differences for your schemas, set `validate: report` in the sidecar of a
+production lane. Then the choice is written down and visible. Move to `enforce`
+when the logs show no unexpected violations.
+
 **Inbound.** XTR validates the message before it calls the backend and
 before `forward`. A message that breaks the XSD gets HTTP 422
 `schema_invalid`. XTR does not call the backend or forward the message.

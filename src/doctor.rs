@@ -108,9 +108,9 @@ fn check_xml_lane_validation(cfg: &AppConfig, out: &mut Vec<Finding>) {
         field: Some("validate".into()),
         headline: "A raw-XML lane does not enforce XSD validation".into(),
         rationale: format!(
-            "The ERRU XML Message Reference requires that the receiver validates\n\
-             a message against its XSD. With `report` or `off`, a message that\n\
-             breaks the XSD reaches the backend or the peer.\n\nLanes:\n  {}",
+            "A receiver of XML messages is expected to validate each message\n\
+             against its XSD. With `report` or `off`, a message that breaks the\n\
+             XSD reaches the backend or the peer.\n\nLanes:\n  {}",
             weak.join("\n  ")
         ),
         recovery: Some(

@@ -24,8 +24,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a message that breaks the XSD gets HTTP 422 `schema_invalid` (the answer lists the element path,
   the rule code and the line, never a value), and XTR does not call the backend, forward the message
   or send the request. An XSD construct outside the supported subset stops the boot with the file and
-  the line. `xtr doctor` reports `off` and `report` as WEAK. Existing lanes validate from now on:
-  set `validate: {inbound: off, outbound: off}` to keep the old behavior.
+  the line. `xtr doctor` reports `off` and `report` as WEAK. Existing lanes validate from now on.
+  Set `validate: {inbound: off, outbound: off}` to keep the old behavior. Until a differential
+  test against a second XSD processor shows no differences for your schemas, write
+  `validate: report` in the sidecar of a production lane.
 - Raw-XML inbound refuses an XML declaration whose `encoding` is not UTF-8 or utf8
   (HTTP 400 `unsupported_encoding`), also before `forward`, and a prolog that is not well-formed
   (`malformed_xml`). The checks are in the parser (`dom::parse_message`). Docs: the `sha256`

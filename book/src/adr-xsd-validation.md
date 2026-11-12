@@ -64,8 +64,8 @@ Reasons:
      outbound: enforce
    ```
 
-   A missing key means `enforce`. `report` logs and counts the errors and
-   does not refuse the message. `xtr doctor` reports `off` and `report` as
+   A missing key means `enforce`. `report` logs the errors and does not
+   refuse the message. `xtr doctor` reports `off` and `report` as
    WEAK.
 5. Answers: an invalid message gets HTTP 422 `schema_invalid`. An invalid
    outbound request does not go to the peer. An internal validator error gets
