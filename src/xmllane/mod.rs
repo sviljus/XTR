@@ -224,6 +224,39 @@ pub struct Message {
     pub cfg: MessageCfg,
 }
 
+/// Rate cap for the warn log of validation violations of one lane.
+/// `/xml-in` has no authentication: a sender of bad messages must not
+/// flood the log. At most [`LOG_BURST`] entries per [`LOG_WINDOW`]. The
+/// first entry of the next window reports how many entries were dropped.
+#[derive(Debug, Default)]
+pub struct LogLimit {
+    state: std::sync::Mutex<LimitState>,
+}
+
+#[derive(Debug, Default)]
+struct LimitState {
+    window_start: Option<std::time::Instant>,
+    logged: u32,
+    suppressed: u32,
+}
+
+/// Entries per window.
+pub const LOG_BURST: u32 = 10;
+/// Length of the window.
+pub const LOG_WINDOW: Duration = Duration::from_secs(60);
+
+impl LogLimit {
+    /// `Some(n)`: log now; `n` entries were dropped since the last log
+    /// entry of the previous window. `None`: drop this entry.
+    pub fn check(&self) -> Option<u32> {
+        self.check_at(std::time::Instant::now())
+    }
+
+    fn check_at(&self, _now: std::time::Instant) -> Option<u32> {
+        Some(0)
+    }
+}
+
 #[derive(Debug)]
 pub struct XmlService {
     pub group: String,
@@ -236,9 +269,17 @@ pub struct XmlService {
     /// XSD validation model. Built at boot when a served direction
     /// validates.
     pub model: Option<Arc<crate::xsdval::Model>>,
+    /// Rate cap of the warn log of validation violations.
+    pub log_limit: LogLimit,
 }
 
 impl XmlService {
+    /// Validation mode of each served direction, for the boot log and
+    /// for `xtr doctor`: `inbound=enforce outbound=report`.
+    pub fn validate_summary(&self) -> String {
+        String::new()
+    }
+
     pub fn backend_for(&self, message: &str) -> Option<String> {
         self.sidecar.backend_for(message)
     }
@@ -511,6 +552,7 @@ fn prepare(root: &Path, sidecar: &Path, cfg: &AppConfig) -> Result<XmlService, S
         sidecar: sc,
         http,
         model,
+        log_limit: LogLimit::default(),
     })
 }
 
@@ -848,5 +890,57 @@ fn build_http(
             }
             b.build().map_err(|e| e.to_string())
         }
+    }
+}
+
+#[cfg(test)]
+mod validate_tests {
+    use super::*;
+    use std::time::Instant;
+
+    #[test]
+    fn the_log_limit_allows_a_burst_and_then_counts_what_it_drops() {
+        let l = LogLimit::default();
+        let t0 = Instant::now();
+        for i in 0..LOG_BURST {
+            assert_eq!(l.check_at(t0), Some(0), "entry {i}");
+        }
+        for _ in 0..5 {
+            assert_eq!(l.check_at(t0 + Duration::from_secs(1)), None);
+        }
+        // The first entry of the next window reports the drops.
+        assert_eq!(l.check_at(t0 + LOG_WINDOW), Some(5));
+        assert_eq!(l.check_at(t0 + LOG_WINDOW), Some(0));
+    }
+
+    #[test]
+    fn a_quiet_lane_logs_every_entry_without_a_suppressed_count() {
+        let l = LogLimit::default();
+        let t0 = Instant::now();
+        assert_eq!(l.check_at(t0), Some(0));
+        assert_eq!(l.check_at(t0 + LOG_WINDOW * 3), Some(0));
+    }
+
+    #[test]
+    fn the_validate_summary_names_each_served_direction() {
+        let sc = |y: &str| serde_yaml_ng::from_str::<XmlSidecar>(y).unwrap();
+        let svc = |sidecar: XmlSidecar| XmlService {
+            group: "g".into(),
+            name: "n".into(),
+            schema: Schema::default(),
+            messages: BTreeMap::new(),
+            sidecar,
+            http: None,
+            model: None,
+            log_limit: LogLimit::default(),
+        };
+        let both = svc(sc(
+            "schemas: [a.xsd]\nmessages: {M: {}}\ninbound: {backend: 'http://b'}\noutbound: {url: 'http://p'}\nvalidate: {inbound: report}\n",
+        ));
+        assert_eq!(both.validate_summary(), "inbound=report outbound=enforce");
+        let only_in = svc(sc(
+            "schemas: [a.xsd]\nmessages: {M: {}}\ninbound: {backend: 'http://b'}\nvalidate: {inbound: off}\n",
+        ));
+        assert_eq!(only_in.validate_summary(), "inbound=off");
     }
 }
