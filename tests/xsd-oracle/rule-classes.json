@@ -22,12 +22,15 @@
     "cvc-length-valid": ["length"],
     "cvc-minLength-valid": ["min_length"],
     "cvc-maxLength-valid": ["max_length"],
-    "cvc-minInclusive-valid": ["min_inclusive"],
+    "cvc-minInclusive-valid": ["min_inclusive", "type_invalid"],
     "cvc-elt.3.1": ["xsi_not_allowed"],
     "cvc-elt.3.2.1": ["xsi_not_allowed"],
     "cvc-elt.4.1": ["xsi_not_allowed"],
     "cvc-elt.4.2": ["xsi_not_allowed"],
     "cvc-elt.4.3": ["xsi_not_allowed"]
+  },
+  "mapping_notes": {
+    "cvc-minInclusive-valid": "A restriction of positiveInteger with minInclusive: for a value below the base range (0, -1) Xerces names the facet that the schema author wrote (cvc-minInclusive-valid). XTR checks the base type first and reports type_invalid. The verdict is the same. The class differs only in the order of the checks. XTR reports min_inclusive when the value is in the base range."
   },
   "wrappers": ["cvc-attribute.3", "cvc-type.3.1.3", "cvc-elt.5.2.2.2.1", "cvc-elt.5.2.2.2.2"]
 }

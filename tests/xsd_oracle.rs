@@ -101,6 +101,16 @@ fn expected_difference_ids() -> BTreeSet<String> {
         .collect()
 }
 
+/// Closed list of differences that the owner approved on purpose
+/// (`owner-approved-accept`). The report counts them apart.
+fn owner_approved_ids() -> BTreeSet<String> {
+    let text = std::fs::read_to_string(oracle_dir().join("owner-approved-accept")).unwrap();
+    text.lines()
+        .filter(|l| !l.trim().is_empty() && !l.starts_with('#'))
+        .map(|l| l.split(':').next().unwrap().trim().to_string())
+        .collect()
+}
+
 // ------------------------------------------------------------------ Rust side
 
 #[derive(Debug)]
@@ -159,7 +169,45 @@ impl<'a> Models<'a> {
 struct Report {
     compared: usize,
     allowed: BTreeMap<String, usize>,
+    /// Hits of `owner-approved-accept`, counted apart from `allowed`.
+    owner_approved: BTreeMap<String, usize>,
+    /// Files that hit `utf8_label`. The oracle runs them again with the label replaced.
+    utf8_files: Vec<String>,
+    /// A strict report allows no owner-approved difference.
+    strict: bool,
     diffs: Vec<String>,
+}
+
+/// The first XML declaration of a message, when there is one.
+fn xml_decl(text: &str) -> Option<&str> {
+    let t = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let rest = t.strip_prefix("<?xml")?;
+    let end = rest.find("?>")?;
+    Some(&rest[..end])
+}
+
+/// True when the declaration has exactly `encoding="utf8"` (any case, either quote).
+fn has_utf8_alias_label(text: &str) -> bool {
+    let Some(decl) = xml_decl(text) else {
+        return false;
+    };
+    regex::Regex::new(r#"(?i-u)\sencoding\s*=\s*(?:"utf8"|'utf8')"#)
+        .unwrap()
+        .is_match(decl)
+}
+
+/// The message with the label `utf8` replaced by `UTF-8` in the declaration.
+fn replace_utf8_label(text: &str) -> String {
+    let t = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let bom = &text[..text.len() - t.len()];
+    let Some(decl) = xml_decl(t) else {
+        return text.to_string();
+    };
+    let new_decl = regex::Regex::new(r#"(?i-u)(\sencoding\s*=\s*)(["'])utf8(["'])"#)
+        .unwrap()
+        .replace(decl, "${1}${2}UTF-8${3}")
+        .into_owned();
+    format!("{bom}<?xml{new_decl}{}", &t["<?xml".len() + decl.len()..])
 }
 
 /// True when the message has a date or dateTime shape with a year of 10 or more digits.
@@ -195,9 +243,19 @@ fn compare(rep: &mut Report, r: &Value, rust: &Rust, text: &str, allowed_ids: &B
     match (verdict, rust) {
         ("refused" | "not_wellformed", Rust::Refused(..)) => {}
         ("refused" | "not_wellformed", Rust::Done(_)) => {
-            rep.diffs.push(format!(
-                "{file}: Xerces says {verdict}, XTR accepted the message"
-            ));
+            let owner = owner_approved_ids();
+            if verdict == "not_wellformed"
+                && !rep.strict
+                && owner.contains("utf8_label")
+                && has_utf8_alias_label(text)
+            {
+                *rep.owner_approved.entry("utf8_label".into()).or_default() += 1;
+                rep.utf8_files.push(file.to_string());
+            } else {
+                rep.diffs.push(format!(
+                    "{file}: Xerces says {verdict}, XTR accepted the message"
+                ));
+            }
         }
         ("valid" | "invalid" | "no_schema", Rust::Refused(kind, text)) => {
             if matches!(kind, DomErrorKind::Encoding) {
@@ -253,6 +311,52 @@ fn compare(rep: &mut Report, r: &Value, rust: &Rust, text: &str, allowed_ids: &B
     }
 }
 
+/// U1: for each message that used the `utf8_label` exception, the oracle replaces the label
+/// with UTF-8 and runs Xerces again. The verdict and the rule class must then agree in full.
+fn rerun_utf8_label(xsd: &Path, msgs: &Path, rep: &mut Report) {
+    if rep.utf8_files.is_empty() {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    for f in &rep.utf8_files {
+        let text = String::from_utf8_lossy(&std::fs::read(msgs.join(f)).unwrap()).into_owned();
+        std::fs::write(tmp.path().join(f), replace_utf8_label(&text)).unwrap();
+    }
+    let Some(out) = oracle(xsd, tmp.path()) else {
+        return;
+    };
+    let mut models = Models::new(xsd);
+    let mut strict = Report {
+        strict: true,
+        ..Report::default()
+    };
+    let none = BTreeSet::new();
+    for r in out["results"].as_array().unwrap() {
+        let f = r["file"].as_str().unwrap();
+        let bytes = std::fs::read(tmp.path().join(f)).unwrap();
+        let rust = match r["schema"].as_str() {
+            Some(schema) => models.check(schema, &bytes),
+            None => Rust::Done(vec![]),
+        };
+        compare(
+            &mut strict,
+            r,
+            &rust,
+            &String::from_utf8_lossy(&bytes),
+            &none,
+        );
+    }
+    for d in strict.diffs {
+        rep.diffs
+            .push(format!("utf8_label rerun (label replaced by UTF-8): {d}"));
+    }
+    assert!(
+        strict.allowed.is_empty(),
+        "the rerun must agree in full, without any allowed difference: {:?}",
+        strict.allowed
+    );
+}
+
 /// Runs the oracle and XTR on a message directory and compares them.
 fn differential(xsd: &Path, msgs: &Path) -> Option<Report> {
     let out = oracle(xsd, msgs)?;
@@ -278,6 +382,7 @@ fn differential(xsd: &Path, msgs: &Path) -> Option<Report> {
         };
         compare(&mut rep, r, &rust, &String::from_utf8_lossy(&bytes), &ids);
     }
+    rerun_utf8_label(xsd, msgs, &mut rep);
     Some(rep)
 }
 
@@ -360,7 +465,10 @@ fn selftest_rust_validator_agrees_with_xerces() {
     let Some(rep) = differential(&dir, &dir.join("messages")) else {
         return;
     };
-    eprintln!("compared {}, allowed {:?}", rep.compared, rep.allowed);
+    eprintln!(
+        "compared {}, allowed {:?}, owner approved {:?}",
+        rep.compared, rep.allowed, rep.owner_approved
+    );
     assert!(rep.compared >= 20);
     assert_clean(&rep);
 }
@@ -530,6 +638,75 @@ fn expected_differences_file_is_closed() {
     .map(|s| s.to_string())
     .collect();
     assert_eq!(expected_difference_ids(), known);
+}
+
+#[test]
+fn owner_approved_file_is_closed_and_counted_apart() {
+    let known: BTreeSet<String> = ["utf8_label"].iter().map(|s| s.to_string()).collect();
+    assert_eq!(owner_approved_ids(), known);
+    // The two lists do not share an entry.
+    assert!(owner_approved_ids().is_disjoint(&expected_difference_ids()));
+    let dir = selftest_dir();
+    let Some(rep) = differential(&dir, &dir.join("messages")) else {
+        return;
+    };
+    assert_clean(&rep);
+    // U3: the hits are counted in their own table.
+    assert!(
+        rep.owner_approved.get("utf8_label").copied().unwrap_or(0) == 1,
+        "only the alias message hits the exception: {rep:?}"
+    );
+    assert!(!rep.allowed.contains_key("utf8_label"));
+}
+
+/// U1 and U2: only the exact alias `utf8` is accepted. Other labels are refused by both sides.
+#[test]
+fn utf8_label_exception_is_narrow() {
+    assert!(has_utf8_alias_label(
+        r#"<?xml version="1.0" encoding="utf8"?><a/>"#
+    ));
+    assert!(has_utf8_alias_label(
+        "<?xml version='1.0' encoding='UTF8'?><a/>"
+    ));
+    for no in [
+        r#"<?xml version="1.0" encoding="utf_8"?><a/>"#,
+        r#"<?xml version="1.0" encoding="utf-8 "?><a/>"#,
+        r#"<?xml version="1.0" encoding="utf8x"?><a/>"#,
+        r#"<?xml version="1.0" encoding="UTF-16"?><a/>"#,
+        r#"<?xml version="1.0" encoding="latin1"?><a/>"#,
+        r#"<a encoding="utf8"/>"#,
+        r#"<a/><?xml version="1.0" encoding="utf8"?>"#,
+    ] {
+        assert!(!has_utf8_alias_label(no), "{no}");
+    }
+    assert_eq!(
+        replace_utf8_label(
+            "\u{feff}<?xml version=\"1.0\" encoding=\"UTF8\"?><a encoding=\"utf8\"/>"
+        ),
+        "\u{feff}<?xml version=\"1.0\" encoding=\"UTF-8\"?><a encoding=\"utf8\"/>"
+    );
+    // The direction is fixed: the exception covers only "Xerces refuses, XTR accepts".
+    let ids = expected_difference_ids();
+    let mut rep = Report::default();
+    let nw: Value =
+        serde_json::json!({"file":"c.xml","verdict":"not_wellformed","cn_chars":0,"errors":[]});
+    let utf8 = r#"<?xml version="1.0" encoding="utf8"?><a/>"#;
+    compare(&mut rep, &nw, &Rust::Done(vec![]), utf8, &ids);
+    assert!(
+        rep.diffs.is_empty() && rep.utf8_files == ["c.xml"],
+        "{rep:?}"
+    );
+    // A different label is a difference.
+    let bad = r#"<?xml version="1.0" encoding="utf8x"?><a/>"#;
+    compare(&mut rep, &nw, &Rust::Done(vec![]), bad, &ids);
+    assert_eq!(rep.diffs.len(), 1);
+    // The exception is off in a strict report.
+    let mut strict = Report {
+        strict: true,
+        ..Report::default()
+    };
+    compare(&mut strict, &nw, &Rust::Done(vec![]), utf8, &ids);
+    assert_eq!(strict.diffs.len(), 1);
 }
 
 #[test]
