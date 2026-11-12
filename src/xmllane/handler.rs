@@ -10,10 +10,11 @@
 //! backend's / caller's business — XTR hands them the received bytes
 //! and their SHA-256 digest so they can decide.
 
-use super::{XmlRegistry, XmlService};
+use super::{ValidateMode, XmlRegistry, XmlService};
 use crate::config::AppConfig;
 use crate::error::XtrError;
 use crate::inbound::{codec, dom};
+use crate::xsdval::{self, Model, Violation};
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Path, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
@@ -109,6 +110,65 @@ pub fn outbound_router<S: Clone + Send + Sync + 'static>(state: XmlLaneState) ->
 
 fn err(status: StatusCode, code: &str, message: &str) -> Response {
     (status, Json(json!({"error": code, "message": message}))).into_response()
+}
+
+fn violation_json(v: &Violation) -> Value {
+    json!({
+        "path": v.path,
+        "code": v.code,
+        "line": v.line,
+        "schemaFile": v.schema_file,
+        "schemaLine": v.schema_line,
+    })
+}
+
+fn schema_invalid(violations: &[Violation]) -> Response {
+    let list: Vec<Value> = violations.iter().map(violation_json).collect();
+    (
+        StatusCode::UNPROCESSABLE_ENTITY,
+        Json(json!({
+            "error": "schema_invalid",
+            "message": "the message does not conform to its XSD",
+            "violations": list,
+        })),
+    )
+        .into_response()
+}
+
+/// Runs the validator. A panic inside it is an internal error, not a
+/// verdict on the message.
+fn run_validator(model: &Model, root: &dom::Element) -> Result<Vec<Violation>, ()> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        xsdval::validate(model, root)
+    }))
+    .map_err(|_| ())
+}
+
+/// Applies the validation mode to the violations of one message.
+/// `Some(response)` means: stop and answer with it.
+fn judge(
+    mode: ValidateMode,
+    group: &str,
+    name: &str,
+    message: &str,
+    direction: &str,
+    violations: &[Violation],
+) -> Option<Response> {
+    if violations.is_empty() {
+        return None;
+    }
+    // Paths and codes only. Never a value from the message.
+    let summary: Vec<String> = violations
+        .iter()
+        .map(|v| format!("{}:{}", v.path, v.code))
+        .collect();
+    if mode == ValidateMode::Enforce {
+        tracing::warn!(group, name, message, direction, violations = ?summary, "XSD validation refused the message");
+        Some(schema_invalid(violations))
+    } else {
+        tracing::warn!(group, name, message, direction, violations = ?summary, "XSD validation (report): the message does not conform");
+        None
+    }
 }
 
 async fn post_canonical(
@@ -217,6 +277,32 @@ async fn handle_inbound(
             &format!("root element {} is not served by this endpoint", root.local),
         );
     };
+    if svc.sidecar.validate.inbound != ValidateMode::Off {
+        if let Some(model) = &svc.model {
+            match run_validator(model, &root) {
+                Err(()) => {
+                    tracing::error!(group, name, message = ?root.local, "XSD validator failed");
+                    return err(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "validator_failed",
+                        "the validator failed",
+                    );
+                }
+                Ok(v) => {
+                    if let Some(resp) = judge(
+                        svc.sidecar.validate.inbound,
+                        group,
+                        name,
+                        &root.local,
+                        "inbound",
+                        &v,
+                    ) {
+                        return resp;
+                    }
+                }
+            }
+        }
+    }
     if let Some(target) = msg.cfg.forward.as_deref() {
         // A forwarded message that is forwarded again is a loop. Refuse it
         // before the outbound call. A forwarded message that goes to a
@@ -373,6 +459,42 @@ async fn call_outbound(
     }
     let element = codec::json_to_root_element(&msg.qname, &value, &svc.schema);
     let xml = format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?>{element}");
+    if svc.sidecar.validate.outbound != ValidateMode::Off {
+        if let Some(model) = &svc.model {
+            // Validate the bytes that go to the peer, read back by the same
+            // parser that reads inbound messages.
+            let checked = dom::parse_message(&xml)
+                .map_err(|_| ())
+                .and_then(|root| run_validator(model, &root));
+            match checked {
+                Err(()) => {
+                    tracing::error!(
+                        group,
+                        name,
+                        message,
+                        "XSD validator failed on an outbound request"
+                    );
+                    return Ok(err(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "validator_failed",
+                        "the validator failed",
+                    ));
+                }
+                Ok(v) => {
+                    if let Some(resp) = judge(
+                        svc.sidecar.validate.outbound,
+                        group,
+                        name,
+                        message,
+                        "outbound",
+                        &v,
+                    ) {
+                        return Ok(resp);
+                    }
+                }
+            }
+        }
+    }
     let timeout = svc.timeout_for(
         message,
         Duration::from_secs(st.cfg.limits.request_timeout_secs),

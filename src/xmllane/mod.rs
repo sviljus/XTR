@@ -50,6 +50,41 @@ pub struct XmlSidecar {
     pub inbound: Option<XmlInbound>,
     #[serde(default)]
     pub outbound: Option<XmlOutbound>,
+    /// XSD validation per direction. A missing key means `enforce`.
+    #[serde(default)]
+    pub validate: ValidateCfg,
+}
+
+/// What XTR does with a message that breaks the XSD.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ValidateMode {
+    /// No validation.
+    Off,
+    /// Log and count the violations. Pass the message on.
+    Report,
+    /// Refuse the message with HTTP 422 `schema_invalid`.
+    #[default]
+    Enforce,
+}
+
+/// `validate:` of a sidecar.
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ValidateCfg {
+    #[serde(default)]
+    pub inbound: ValidateMode,
+    #[serde(default)]
+    pub outbound: ValidateMode,
+}
+
+impl ValidateCfg {
+    /// Whether the lane needs the validation model: some direction that
+    /// the sidecar serves validates.
+    fn needs_model(&self, sc: &XmlSidecar) -> bool {
+        (sc.inbound.is_some() && self.inbound != ValidateMode::Off)
+            || (sc.outbound.is_some() && self.outbound != ValidateMode::Off)
+    }
 }
 
 /// Which way a message type travels on this lane.
@@ -198,6 +233,9 @@ pub struct XmlService {
     pub sidecar: XmlSidecar,
     /// Built at boot when `outbound:` is configured.
     pub http: Option<reqwest::Client>,
+    /// XSD validation model. Built at boot when a served direction
+    /// validates.
+    pub model: Option<Arc<crate::xsdval::Model>>,
 }
 
 impl XmlService {
@@ -419,6 +457,7 @@ fn prepare(root: &Path, sidecar: &Path, cfg: &AppConfig) -> Result<XmlService, S
     check_directions(&sc, &messages)?;
     check_inbound(&sc, &messages)?;
     let http = build_outbound(&sc, &messages, cfg)?;
+    let model = build_model(&sc, &entries, &loader)?;
 
     Ok(XmlService {
         group,
@@ -427,6 +466,7 @@ fn prepare(root: &Path, sidecar: &Path, cfg: &AppConfig) -> Result<XmlService, S
         messages,
         sidecar: sc,
         http,
+        model,
     })
 }
 
@@ -682,6 +722,40 @@ fn check_peer_target(
         }
     }
     Ok(url)
+}
+
+/// Builds the XSD validation model when a served direction validates.
+fn build_model(
+    sc: &XmlSidecar,
+    entries: &[(String, String)],
+    loader: &contract::SchemaLoader,
+) -> Result<Option<Arc<crate::xsdval::Model>>, String> {
+    if !sc.validate.needs_model(sc) {
+        return Ok(None);
+    }
+    let roots: Vec<&str> = sc.messages.keys().map(String::as_str).collect();
+    let built = crate::xsdval::build(entries, loader, &roots).map_err(|problems| {
+        let mut lines: Vec<String> = problems
+            .iter()
+            .take(20)
+            .map(|p| {
+                let at = if p.line > 0 {
+                    format!("{}:{}", p.file, p.line)
+                } else {
+                    p.file.clone()
+                };
+                format!("  {at}: {} (in {})", p.construct, p.component)
+            })
+            .collect();
+        if problems.len() > 20 {
+            lines.push(format!("  and {} more", problems.len() - 20));
+        }
+        format!(
+            "XSD validation cannot be built for this lane. Fix the schema or set `validate:` to `off`:\n{}",
+            lines.join("\n")
+        )
+    })?;
+    Ok(Some(Arc::new(built)))
 }
 
 fn build_http(
