@@ -1188,3 +1188,32 @@ async fn inbound_still_accepts_one_bom_and_a_well_formed_prolog() {
     }
     assert_eq!(seen.lock().unwrap().len(), ok.len());
 }
+
+/// XML 1.0 §2.8: the declaration has `version`, then an optional `encoding`,
+/// then an optional `standalone`, each once, in lower case. Nothing else.
+#[tokio::test]
+async fn inbound_refuses_declarations_that_break_the_declaration_grammar() {
+    let (backend, seen) = spawn_backend().await;
+    let env = build(&inbound_sidecar(&backend));
+    let root = r#"<Notify_Request xmlns="urn:erru"><Header technicalId="t-1" workflowId="w-1"/><Body businessCaseId="b-1"><TransportManager/></Body></Notify_Request>"#;
+    let decls = [
+        r#"<?xml version="1.0" encoding="UTF-8" encoding="UTF-7"?>"#,
+        r#"<?xml version="1.0" Encoding="UTF-7"?>"#,
+        r#"<?xml version="1.0" encoding="UTF-8" foo="x"?>"#,
+        r#"<?xml version="1.0" standalone="yes" encoding="UTF-8"?>"#,
+        r#"<?xml encoding="UTF-8" version="1.0"?>"#,
+        r#"<?xml version="1.0" version="1.1"?>"#,
+        r#"<?xml version="1.0" standalone="maybe"?>"#,
+        r#"<?xml encoding="UTF-8"?>"#,
+        r#"<?xml?>"#,
+    ];
+    for decl in decls {
+        let (st, body, _) = call(
+            &env.app,
+            xml_post("/xml-in/erru/msg", &format!("{decl}{root}")),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{decl}: {body}");
+    }
+    assert!(seen.lock().unwrap().is_empty());
+}
