@@ -533,4 +533,27 @@ mod tests {
                     <xs:element name="Msg" type="t:V"/>"#;
         assert!(try_build(ok, "Msg").is_ok());
     }
+
+    #[test]
+    fn a_min_inclusive_value_must_fit_the_base_type() {
+        for (base, bad) in [
+            ("xs:positiveInteger", "abc"),
+            ("xs:nonNegativeInteger", "-5"),
+            ("xs:dateTime", "2026-13-01T00:00:00Z"),
+            ("xs:date", "yesterday"),
+        ] {
+            let body = format!(
+                r#"<xs:simpleType name="V"><xs:restriction base="{base}"><xs:minInclusive value="{bad}"/></xs:restriction></xs:simpleType>
+                   <xs:element name="Msg" type="t:V"/>"#
+            );
+            let c = constructs(&body, "Msg");
+            assert!(
+                c.iter().any(|c| c.contains("minInclusive")),
+                "{base} {bad}: {c:?}"
+            );
+        }
+        let ok = r#"<xs:simpleType name="V"><xs:restriction base="xs:dateTime"><xs:minInclusive value="1753-01-01T00:00:00Z"/></xs:restriction></xs:simpleType>
+                    <xs:element name="Msg" type="t:V"/>"#;
+        assert!(try_build(ok, "Msg").is_ok());
+    }
 }
