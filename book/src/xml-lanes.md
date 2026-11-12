@@ -93,7 +93,7 @@ outbound:
 
 validate:                    # XSD validation, see "XSD validation"
   inbound: report            # off | report | enforce (default enforce)
-  outbound: report           # do not copy enforce to production before "Turning on enforce"
+  outbound: report           # do not copy enforce to production before "Turning on enforce or annotate"
 ```
 
 Boot is refused, and XTR prints the full list of faults, for each of
@@ -393,10 +393,8 @@ goes to the backend, also input that XTR would refuse in the other modes.
 In production, restrict the inbound port to the peer (ingress mTLS or a
 network rule). `xtr doctor` reports the lane as INFO for this reason.
 
-**Roll-out.** Use `report` first. Move to `annotate` when the backend
-handles `schemaValid: false` and `/_invalid`. The change from `report`
-to `annotate` is not a change of the XTR answer only: the backend now
-decides what the peer sees.
+**Roll-out.** Use `report` first. Move to `annotate` as "Turning on enforce or
+annotate" says.
 
 ### Rolling out a version with validation
 
@@ -410,12 +408,13 @@ means `enforce`. Do the steps in this order:
 3. Roll out the new version.
 4. Read the logs (see "Logs"). Decide for each violation if the peer or
    the validator is wrong.
-5. Turn on `enforce` for one lane and one direction at a time. See
-   "Turning on enforce".
+5. Turn on `enforce` or `annotate` for one lane and one direction at a
+   time. See "Turning on enforce or annotate".
 
-### Turning on enforce
+### Turning on enforce or annotate
 
-Do this only when **all** of these conditions are true:
+Do this only when **all** of these conditions are true. They apply to
+`enforce` and to `annotate`:
 
 1. A differential test for the schemas of the lane shows 0 differences.
    The test compares XTR with an independent XSD 1.0 processor (for
@@ -429,8 +428,15 @@ Do this only when **all** of these conditions are true:
 3. `xtr doctor` lists the lane as `report`. The boot log shows the mode.
 4. The log entries of the last period have `suppressed` equal to 0 (see
    "Logs"). A non-zero count means that the log hides violations.
-5. For `inbound`: the protocol of the peer accepts an HTTP 4xx answer to
-   an invalid message (see "Modes").
+5. For `inbound` with `enforce`: the protocol of the peer accepts an
+   HTTP 4xx answer to an invalid message (see "Modes").
+6. For `annotate`: the backend handles `schemaValid: false` and
+   `<backend>/_invalid` (see "Annotate"). A test with the synthetic
+   messages of the contract shows the answer of the backend for each
+   case.
+7. For `annotate`: the inbound port accepts only the peer (ingress mTLS
+   or a network rule). Every request body that reaches the lane goes to
+   the backend.
 
 Turn on `outbound` first. An invalid outbound request is a fault of the
 own system, and the effect stays with the own caller. Then turn on
@@ -448,6 +454,16 @@ own system, and the effect stays with the own caller. Then turn on
   not change, because XTR builds the model also for `report`.
 * A validator error gives HTTP 500 `validator_failed`. XTR refuses the
   message (fail closed).
+
+**What changes with `annotate`.**
+
+* XTR no longer answers an invalid message itself. The backend answers
+  it. The backend must give the peer the answer that the protocol
+  requires (for example an `ErrorNotification`).
+* XTR also calls the backend for input that the other modes refuse with
+  HTTP 400 (see "Annotate").
+* The roll back to `report` stops the backend from getting the verdict.
+  The backend then gets an invalid message as if it were valid.
 
 **Check after the change.** Read the boot log and the output of
 `xtr doctor`. Count the 422 and 500 answers in the first days. If the
