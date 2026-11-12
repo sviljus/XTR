@@ -87,6 +87,10 @@ outbound:
   keystore_password_env: XTR_OUTBOUND_KEYSTORE_PASSWORD
   trust_ca_path: /app/ssl/peer-ca.pem      # optional
   content_type: application/xml; charset=utf-8
+
+validate:                    # XSD validation, see "XSD validation"
+  inbound: enforce           # off | report | enforce (default enforce)
+  outbound: enforce
 ```
 
 Boot is refused, and XTR prints the full list of faults, for each of
@@ -108,6 +112,9 @@ these cases:
 * A `schemas:` entry contains a path separator.
 * `outbound.content_type` is not valid.
 * `timeout_secs` is out of range.
+* The `validate:` section has an unknown key or an unknown mode.
+* An XSD construct is outside the supported XSD subset while validation
+  is on. This includes a construct in an imported or included file.
 * A peer URL fails the SSRF guard that also checks WSDL-declared URLs
   (`wsdl.allow_http_upstream`, `wsdl.upstream_host_allowlist`).
 
@@ -236,11 +243,91 @@ an error body — `upstream_timeout` 504, `upstream_unreachable` 502 (no
 URL in the response, it is logged). Once the peer has answered, its
 status is always returned, whatever the body looks like.
 
+## XSD validation
+
+XTR validates inbound messages and outbound requests against the XSD
+of the lane. The validator is written in Rust. It reads the same XSD
+files as the codec and the same element tree as the codec.
+Validation of the responses of a peer is not covered.
+
+```yaml
+validate:
+  inbound: enforce    # off | report | enforce
+  outbound: enforce
+```
+
+A missing key means `enforce`.
+
+| Mode | Behavior |
+|------|----------|
+| `enforce` | XTR refuses a message that breaks the XSD. |
+| `report` | XTR logs the violations and passes the message on. |
+| `off` | XTR does not validate. |
+
+Use `report` only in a test environment and for a limited time. `xtr doctor`
+reports a lane with `off` or `report` as WEAK.
+
+**Inbound.** XTR validates the message before it calls the backend and
+before `forward`. A message that breaks the XSD gets HTTP 422
+`schema_invalid`. XTR does not call the backend or forward the message.
+
+**Outbound.** XTR validates the serialized request, the bytes that go to the
+peer. A request that breaks the XSD gets HTTP 422 `schema_invalid` to the
+caller. XTR does not send it.
+
+An internal error of the validator gives HTTP 500 `validator_failed`. The
+details go to the log only.
+
+**Answer.** The body lists at most 10 violations:
+
+```json
+{
+  "error": "schema_invalid",
+  "message": "the message does not conform to its XSD",
+  "violations": [
+    {"path": "/Notify_Request/Header/@technicalId", "code": "attribute_missing",
+     "line": 1, "schemaFile": "Global_Types.xsd", "schemaLine": 12}
+  ]
+}
+```
+
+A violation holds the element path, a rule code, the line in the message, and
+the file and line in the schema. It never holds a value from the message.
+The schema file name is relative to the schema directory.
+
+Rule codes: `root_unknown`, `element_unexpected`, `element_missing`,
+`attribute_unexpected`, `attribute_missing`, `attribute_fixed`,
+`xsi_not_allowed`, `text_not_allowed`, `simple_content_expected`,
+`type_invalid`, `enumeration`, `pattern`, `length`, `min_length`,
+`max_length`, `min_inclusive`.
+
+**Supported XSD.** `xs:include`, `xs:sequence`, `xs:choice`, `xs:extension`,
+`xs:restriction`, `xs:attribute`, `xs:attributeGroup`, the facets
+`enumeration`, `whiteSpace`, `length`, `minLength`, `maxLength`,
+`minInclusive` and `pattern`, `fixed`, and the types `string`, `token`,
+`boolean`, `nonNegativeInteger`, `positiveInteger`, `date` and `dateTime`.
+
+**Boot.** When a lane validates, XTR builds the model at boot. A construct
+outside the supported XSD that a message root reaches stops the boot. The
+error names the file, the line and the construct. Also refused: an ambiguous
+content model (two particles with the same qualified name at one decision
+point), a duplicate global definition, an `xs:include` with another
+`targetNamespace`, a chameleon include, `maxOccurs="0"`, and a `pattern`
+that XSD does not define. Set `validate:` to `off` for the lane to boot
+without validation.
+
+**`xsi` attributes.** `xsi:type` and `xsi:nil` in a message are violations.
+`xsi:schemaLocation` and `xsi:noNamespaceSchemaLocation` are ignored. XTR
+never loads a schema from a message.
+
+**Patterns.** A `pattern` follows the XSD grammar: it matches the whole value,
+`^` and `$` are plain characters, `.` excludes only line ends, and `\s`,
+`\d` and `\w` use the XSD definitions. A construct of the `regex` syntax that
+XSD does not define is an error at boot.
+
 ## Not covered
 
-* **XSD validation.** The schema is a codec hint (order, repetition,
-  namespaces). Required elements, enumerations and facets are **not**
-  checked; validate in the backend/caller if the peer requires it.
+* Validation of the responses of a peer.
 * Sync replies in the response body, SOAP, WS-Security, retries, queues.
 * `xtr doctor` only counts `.xml.yaml` lanes for the shared-listener
   exposure check; sidecar contents are validated at boot.
