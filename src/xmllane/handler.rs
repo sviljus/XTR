@@ -245,6 +245,182 @@ fn hex(bytes: &[u8]) -> String {
     })
 }
 
+/// `validate.inbound: annotate`. The backend always gets the verdict and
+/// owns the answer. Input that XTR cannot read as a message of the lane
+/// goes to `<inbound.backend>/_invalid`. A message that breaks the XSD goes
+/// to its own backend URL with `schemaValid: false`. The invalid input is
+/// never decoded and never sent as text: only `rawBase64` carries it.
+/// 413 and `XTR_OFFLINE` stay HTTP answers.
+async fn handle_annotated(
+    st: &XmlLaneState,
+    svc: &XmlService,
+    group: &str,
+    name: &str,
+    headers: &HeaderMap,
+    body: &[u8],
+) -> Response {
+    use base64::Engine;
+    let ib = svc.sidecar.inbound.as_ref().expect("checked by the caller");
+    let service = format!("{group}/{name}");
+    if st.offline {
+        tracing::info!(
+            group,
+            name,
+            "inbound XML backend call blocked by XTR_OFFLINE"
+        );
+        return err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "offline",
+            "XTR_OFFLINE: backend calls disabled",
+        );
+    }
+    let digest = hex(&Sha256::digest(body));
+    let raw_b64 = base64::engine::general_purpose::STANDARD.encode(body);
+    // Input that is not a message of the lane goes to `_invalid`.
+    let text = std::str::from_utf8(body).map_err(|_| "unsupported_encoding");
+    let parsed = match text {
+        Ok(t) => dom::parse_message(t).map_err(|e| match e.1 {
+            dom::DomErrorKind::Encoding => "unsupported_encoding",
+            dom::DomErrorKind::Doctype => "doctype",
+            dom::DomErrorKind::Malformed => "malformed_xml",
+        }),
+        Err(c) => Err(c),
+    };
+    let root = match parsed {
+        Ok(r) => r,
+        Err(code) => {
+            return send_invalid(
+                st,
+                svc,
+                ib,
+                headers,
+                (group, name),
+                &service,
+                &digest,
+                &raw_b64,
+                code,
+            )
+            .await;
+        }
+    };
+    let Some(msg) = svc
+        .messages
+        .get(&root.local)
+        .filter(|m| m.qname.ns == root.ns && m.cfg.direction.inbound())
+    else {
+        return send_invalid(
+            st,
+            svc,
+            ib,
+            headers,
+            (group, name),
+            &service,
+            &digest,
+            &raw_b64,
+            "unsupported_message",
+        )
+        .await;
+    };
+    let violations = match gate(ValidateMode::Annotate, svc.model.as_deref(), &root) {
+        Ok(v) => v,
+        Err(()) => {
+            tracing::error!(group, name, msg_type = ?root.local, "XSD validator failed");
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "validator_failed",
+                "the validator failed",
+            );
+        }
+    };
+    let Some(url) = svc.backend_for(&root.local) else {
+        return err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "no_backend",
+            "no backend configured for this message",
+        );
+    };
+    let payload = if violations.is_empty() {
+        let ty = svc
+            .schema
+            .element(&msg.qname)
+            .and_then(|t| svc.schema.resolve(t));
+        let mut p = json!({
+            "service": service,
+            "message": root.local,
+            "request": codec::element_to_json(&root, ty, &svc.schema),
+            "sha256": digest,
+            "schemaValid": true,
+            "violations": [],
+        });
+        if ib.include_raw {
+            p["rawXml"] = Value::String(String::from_utf8_lossy(body).into_owned());
+        }
+        p
+    } else {
+        // Paths and codes only. Never a value from the message.
+        let summary: Vec<String> = violations
+            .iter()
+            .map(|v| format!("{}:{}", v.path, v.code))
+            .collect();
+        if let Some(suppressed) = svc.log_limit_inbound.check() {
+            tracing::warn!(group, name, msg_type = %root.local, direction = "inbound", violations = ?summary, suppressed, "XSD validation (annotate): the message does not conform");
+        }
+        json!({
+            "service": service,
+            "message": root.local,
+            "sha256": digest,
+            "rawBase64": raw_b64,
+            "schemaValid": false,
+            "violations": violations.iter().map(violation_json).collect::<Vec<_>>(),
+        })
+    };
+    call_backend(st, ib, &url, &payload, (group, name, &root.local), headers).await
+}
+
+/// Sends input that is not a message of the lane to `<backend>/_invalid`.
+#[allow(clippy::too_many_arguments)]
+async fn send_invalid(
+    st: &XmlLaneState,
+    svc: &XmlService,
+    ib: &super::XmlInbound,
+    headers: &HeaderMap,
+    (group, name): (&str, &str),
+    service: &str,
+    digest: &str,
+    raw_b64: &str,
+    code: &'static str,
+) -> Response {
+    // The sidecar check guarantees `inbound.backend` under `annotate`.
+    let base = ib.backend.as_deref().unwrap_or_default();
+    let url = format!("{}/{}", base.trim_end_matches('/'), super::INVALID_ROUTE);
+    if let Some(suppressed) = svc.log_limit_inbound.check() {
+        tracing::warn!(
+            group,
+            name,
+            direction = "inbound",
+            code,
+            suppressed,
+            "XSD validation (annotate): input is not a message of the lane"
+        );
+    }
+    let payload = json!({
+        "service": service,
+        "sha256": digest,
+        "rawBase64": raw_b64,
+        "schemaValid": false,
+        "violations": [{"code": code}],
+    });
+    call_backend(
+        st,
+        ib,
+        &url,
+        &payload,
+        (group, name, super::INVALID_ROUTE),
+        headers,
+    )
+    .await
+}
+
 async fn handle_inbound(
     st: &XmlLaneState,
     group: &str,
@@ -271,6 +447,9 @@ async fn handle_inbound(
             "payload_too_large",
             &format!("request exceeds {limit} bytes"),
         );
+    }
+    if svc.sidecar.validate.inbound == ValidateMode::Annotate {
+        return handle_annotated(st, svc, group, name, headers, body).await;
     }
     let Ok(text) = std::str::from_utf8(body) else {
         return err(
@@ -368,19 +547,32 @@ async fn handle_inbound(
     if ib.include_raw {
         payload["rawXml"] = Value::String(text.to_string());
     }
+    call_backend(st, ib, &url, &payload, (group, name, &root.local), headers).await
+}
+
+/// POSTs the payload to the backend and maps its answer to the answer for
+/// the peer.
+async fn call_backend(
+    st: &XmlLaneState,
+    ib: &super::XmlInbound,
+    url: &str,
+    payload: &Value,
+    (group, name, msg_type): (&str, &str, &str),
+    headers: &HeaderMap,
+) -> Response {
     let mut req = st
         .backend
-        .post(&url)
+        .post(url)
         .header("x-xtr-inbound-service", format!("{group}/{name}"))
-        .header("x-xtr-message", root.local.as_str())
-        .json(&payload);
+        .header("x-xtr-message", msg_type)
+        .json(payload);
     if let Some(tp) = headers.get("traceparent") {
         req = req.header("traceparent", tp.clone());
     }
     let resp = match req.send().await {
         Ok(r) => r,
         Err(e) => {
-            tracing::warn!(msg_type = ?root.local, url = ?url, error = ?e.to_string(), "inbound XML backend call failed");
+            tracing::warn!(msg_type = msg_type, url = ?url, error = ?e.to_string(), "inbound XML backend call failed");
             return if e.is_timeout() {
                 err(
                     StatusCode::GATEWAY_TIMEOUT,
@@ -416,7 +608,11 @@ async fn handle_inbound(
     }
     // 5xx and any 4xx outside `relay_statuses` (wrong backend path,
     // gateway guard …): not a verdict on the message — the peer must retry.
-    tracing::warn!(msg_type = ?root.local, status = status.as_u16(), "inbound XML backend failed");
+    tracing::warn!(
+        msg_type = msg_type,
+        status = status.as_u16(),
+        "inbound XML backend failed"
+    );
     err(StatusCode::BAD_GATEWAY, "backend_error", "backend failed")
 }
 

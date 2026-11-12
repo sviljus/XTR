@@ -310,3 +310,20 @@ fn doctor_is_quiet_about_validation_when_the_lane_enforces_it() {
         );
     }
 }
+
+#[test]
+fn doctor_gives_info_not_weak_for_an_annotate_lane() {
+    let tmp = xml_lane_with("validate: {inbound: annotate}\n");
+    let (code, stdout, _) = run_doctor(tmp.path(), &[]);
+    assert_eq!(code, 0, "{stdout}");
+    assert!(stdout.contains("info-xml-lane-annotate"), "{stdout}");
+    assert!(stdout.contains("erru/m"), "names the lane: {stdout}");
+    assert!(
+        stdout.contains("restrict the inbound port to the peer"),
+        "{stdout}"
+    );
+    assert!(
+        !stdout.contains("weak-xml-lane-validation-not-enforced"),
+        "{stdout}"
+    );
+}

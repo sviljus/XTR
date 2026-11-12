@@ -66,6 +66,9 @@ pub enum ValidateMode {
     /// Refuse the message with HTTP 422 `schema_invalid`.
     #[default]
     Enforce,
+    /// Inbound only. Always call the backend and tell it the verdict
+    /// (`schemaValid`, `violations`). The backend owns the answer.
+    Annotate,
 }
 
 impl ValidateMode {
@@ -74,6 +77,7 @@ impl ValidateMode {
             Self::Off => "off",
             Self::Report => "report",
             Self::Enforce => "enforce",
+            Self::Annotate => "annotate",
         }
     }
 }
@@ -412,6 +416,10 @@ impl XmlRegistry {
     }
 }
 
+/// Route under `inbound.backend` that receives input XTR cannot read as a
+/// message of the lane (`annotate` only).
+pub const INVALID_ROUTE: &str = "_invalid";
+
 const RESERVED_PATHS: [&str; 6] = [
     "/health",
     "/api",
@@ -458,7 +466,7 @@ pub fn weak_validation(dir: Option<&Path>) -> Vec<String> {
             (x.inbound.is_some(), "inbound", x.validate.inbound),
             (x.outbound.is_some(), "outbound", x.validate.outbound),
         ] {
-            if served && mode != ValidateMode::Enforce {
+            if served && !matches!(mode, ValidateMode::Enforce | ValidateMode::Annotate) {
                 let m = if mode == ValidateMode::Off {
                     "off"
                 } else {
@@ -469,6 +477,33 @@ pub fn weak_validation(dir: Option<&Path>) -> Vec<String> {
         }
         if !weak.is_empty() {
             out.push(format!("{lane} {}", weak.join(" ")));
+        }
+    }
+    out.sort();
+    out
+}
+
+/// Lanes with `validate.inbound: annotate`, as `group/name` — reads the
+/// sidecars only, for `xtr doctor`.
+pub fn annotate_lanes(dir: Option<&Path>) -> Vec<String> {
+    let mut out = Vec::new();
+    let Some(root) = dir.filter(|d| d.is_dir()) else {
+        return out;
+    };
+    let Ok(files) = sidecar_files(root) else {
+        return out;
+    };
+    for sc in files {
+        let Ok(text) = fs::read_to_string(&sc) else {
+            continue;
+        };
+        let Ok(x) = serde_yaml_ng::from_str::<XmlSidecar>(&text) else {
+            continue;
+        };
+        if x.inbound.is_some() && x.validate.inbound == ValidateMode::Annotate {
+            if let Ok((group, name)) = lane_id(root, &sc) {
+                out.push(format!("{group}/{name}"));
+            }
         }
     }
     out.sort();
@@ -580,6 +615,7 @@ fn prepare(root: &Path, sidecar: &Path, cfg: &AppConfig) -> Result<XmlService, S
     let entries = schema_entries(&sc, &loader)?;
     let (schema, _files) = contract::load_xsd(&entries, &loader)?;
 
+    check_annotate(&sc)?;
     let messages = resolve_messages(&sc, &schema)?;
     check_directions(&sc, &messages)?;
     check_inbound(&sc, &messages)?;
@@ -662,6 +698,44 @@ fn schema_entries(
         entries.push((fname, xml));
     }
     Ok(entries)
+}
+
+/// Rules for `validate: annotate`.
+fn check_annotate(sc: &XmlSidecar) -> Result<(), String> {
+    if sc.validate.outbound == ValidateMode::Annotate {
+        return Err(
+            "`validate.outbound: annotate` is not allowed: `annotate` applies to `inbound` only"
+                .into(),
+        );
+    }
+    if sc.inbound.is_some() && sc.validate.inbound == ValidateMode::Annotate {
+        if sc.messages.contains_key(INVALID_ROUTE) {
+            return Err(format!(
+                "`annotate` sends unreadable input to <backend>/{INVALID_ROUTE}: a message cannot be named {INVALID_ROUTE:?}"
+            ));
+        }
+        if sc
+            .inbound
+            .as_ref()
+            .and_then(|i| i.backend.as_deref())
+            .is_none()
+        {
+            return Err(
+                "`validate.inbound: annotate` needs `inbound.backend`: unreadable input goes to <inbound.backend>/_invalid"
+                    .into(),
+            );
+        }
+        if let Some((m, _)) = sc
+            .messages
+            .iter()
+            .find(|(_, c)| c.as_ref().is_some_and(|c| c.forward.is_some()))
+        {
+            return Err(format!(
+                "message {m}: `forward` cannot be combined with `validate.inbound: annotate` (forward sends the bytes unchanged, the old system would not learn the verdict)"
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Maps each message of the sidecar to a global element of the schemas.

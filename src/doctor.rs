@@ -91,8 +91,32 @@ pub fn run(cfg: &AppConfig, cfg_path: Option<&Path>) -> Vec<Finding> {
     check_inter_service_token(&mut findings);
     check_soap_lanes_exposure(cfg, &mut findings);
     check_xml_lane_validation(cfg, &mut findings);
+    check_xml_lane_annotate(cfg, &mut findings);
     add_context_info(cfg, cfg_path, &mut findings);
     findings
+}
+
+/// Raw-XML lanes in `annotate` mode: XTR passes every request body that
+/// reaches the lane to the backend.
+fn check_xml_lane_annotate(cfg: &AppConfig, out: &mut Vec<Finding>) {
+    let lanes = crate::xmllane::annotate_lanes(cfg.wsdl_watch_dir.as_deref());
+    if lanes.is_empty() {
+        return;
+    }
+    out.push(Finding {
+        severity: Severity::Info,
+        code: "info-xml-lane-annotate".into(),
+        field: Some("validate".into()),
+        headline: "A raw-XML lane uses `annotate`".into(),
+        rationale: format!(
+            "With `annotate`, the backend receives every request body that reaches\n\
+             the lane, also unreadable input, and it decides the answer. The backend\n\
+             must refuse a message with schemaValid=false. In production, you must\n\
+             restrict the inbound port to the peer (ingress mTLS or a network rule).\n\nLanes:\n  {}",
+            lanes.join("\n  ")
+        ),
+        recovery: None,
+    });
 }
 
 /// Raw-XML lanes whose served direction does not enforce XSD validation.

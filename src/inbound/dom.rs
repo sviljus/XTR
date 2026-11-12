@@ -128,6 +128,8 @@ pub enum DomErrorKind {
     Malformed,
     /// The XML declaration names an encoding other than UTF-8.
     Encoding,
+    /// The document has a DOCTYPE / DTD.
+    Doctype,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -328,7 +330,10 @@ fn parse_impl(xml: &str, strict: bool) -> Result<Element, DomError> {
                 push_text(&mut stack, ch.encode_utf8(&mut [0u8; 4]));
             }
             Event::DocType(_) => {
-                return Err(err("DOCTYPE is not allowed (XXE / entity-expansion risk)"));
+                return Err(DomError(
+                    "DOCTYPE is not allowed (XXE / entity-expansion risk)".into(),
+                    DomErrorKind::Doctype,
+                ));
             }
             Event::Decl(d) => {
                 if strict {

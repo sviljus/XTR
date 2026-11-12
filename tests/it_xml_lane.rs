@@ -1395,3 +1395,224 @@ fn an_unsupported_xsd_construct_refuses_boot_unless_validation_is_off() {
     let xsd = write(&with_validate(both, "{inbound: off, outbound: off}"));
     assert!(xmllane::load_all(Some(xsd.path()), &cfg_for(&xsd, &dsl)).is_ok());
 }
+
+// ------------------------------------------------------------ annotate
+
+fn annotate_sidecar(backend: &str) -> String {
+    with_validate(&inbound_sidecar(backend), "{inbound: annotate}")
+}
+
+fn bytes_post(uri: &str, body: &[u8]) -> Request<Body> {
+    Request::post(uri)
+        .header("content-type", "application/xml")
+        .body(Body::from(body.to_vec()))
+        .unwrap()
+}
+
+fn raw_of(v: &Value) -> Vec<u8> {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD
+        .decode(v["rawBase64"].as_str().expect("rawBase64"))
+        .unwrap()
+}
+
+#[tokio::test]
+async fn annotate_valid_message_goes_to_the_backend_with_schema_valid_true() {
+    let (backend, seen) = spawn_backend().await;
+    let env = build(&annotate_sidecar(&backend));
+    let (st, body, _) = call(&env.app, xml_post("/xml-in/erru/msg", NOTIFY_XML)).await;
+    assert_eq!(st, StatusCode::ACCEPTED, "{body}");
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.len(), 1);
+    let (msg, v) = &seen[0];
+    assert_eq!(msg, "Notify_Request");
+    assert_eq!(v["schemaValid"], true);
+    assert_eq!(v["violations"], json!([]));
+    assert_eq!(v["request"]["Header"]["@technicalId"], "t-1");
+    assert_eq!(v["rawXml"], NOTIFY_XML);
+    assert!(v.get("rawBase64").is_none(), "{v}");
+}
+
+#[tokio::test]
+async fn annotate_schema_invalid_message_still_reaches_the_backend_without_request_and_rawxml() {
+    let (backend, seen) = spawn_backend().await;
+    let env = build(&annotate_sidecar(&backend));
+    let (st, body, _) = call(&env.app, xml_post("/xml-in/erru/msg", NOTIFY_INVALID)).await;
+    // The peer gets the answer of the backend.
+    assert_eq!(st, StatusCode::ACCEPTED, "{body}");
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.len(), 1);
+    let (msg, v) = &seen[0];
+    assert_eq!(msg, "Notify_Request");
+    assert_eq!(v["schemaValid"], false);
+    assert_eq!(v["service"], "erru/msg");
+    assert_eq!(v["violations"][0]["code"], "attribute_missing");
+    assert_eq!(
+        v["violations"][0]["path"],
+        "/Notify_Request/Header/@technicalId"
+    );
+    assert!(v["violations"][0]["schemaLine"].as_u64().unwrap() > 0);
+    // The message is not trusted: no decoded request and no text copy.
+    assert!(v.get("request").is_none(), "{v}");
+    assert!(v.get("rawXml").is_none(), "{v}");
+    assert_eq!(raw_of(v), NOTIFY_INVALID.as_bytes());
+    assert_eq!(v["sha256"].as_str().unwrap().len(), 64);
+    // Fields live at the top level only.
+    assert!(!v["violations"].to_string().contains("SECRET-4711"));
+}
+
+#[tokio::test]
+async fn annotate_ignores_include_raw_false_for_an_invalid_message() {
+    let (backend, seen) = spawn_backend().await;
+    let sidecar = annotate_sidecar(&backend)
+        .replace("path: /erru/xml", "path: /erru/xml\n  include_raw: false");
+    let env = build(&sidecar);
+    call(&env.app, xml_post("/xml-in/erru/msg", NOTIFY_INVALID)).await;
+    call(&env.app, xml_post("/xml-in/erru/msg", NOTIFY_XML)).await;
+    let seen = seen.lock().unwrap();
+    assert_eq!(raw_of(&seen[0].1), NOTIFY_INVALID.as_bytes());
+    assert!(seen[1].1.get("rawXml").is_none() && seen[1].1.get("rawBase64").is_none());
+}
+
+#[tokio::test]
+async fn annotate_sends_unparsable_and_unknown_input_to_the_invalid_route() {
+    let (backend, seen) = spawn_backend().await;
+    let env = build(&annotate_sidecar(&backend));
+    let cases: Vec<(&str, Vec<u8>, &str)> = vec![
+        (
+            "malformed",
+            b"<Notify_Request xmlns=\"urn:erru\"><Header>".to_vec(),
+            "malformed_xml",
+        ),
+        ("not xml", b"hello".to_vec(), "malformed_xml"),
+        (
+            "doctype",
+            b"<!DOCTYPE x [<!ENTITY a SYSTEM \"file:///etc/passwd\">]><Notify_Request xmlns=\"urn:erru\"/>".to_vec(),
+            "doctype",
+        ),
+        (
+            "encoding decl",
+            b"<?xml version=\"1.0\" encoding=\"UTF-16\"?><Notify_Request xmlns=\"urn:erru\"/>"
+                .to_vec(),
+            "unsupported_encoding",
+        ),
+        (
+            "not utf-8",
+            vec![0x3c, 0x61, 0xff, 0xfe, 0x3e],
+            "unsupported_encoding",
+        ),
+        (
+            "unknown root",
+            b"<Nope xmlns=\"urn:erru\"/>".to_vec(),
+            "unsupported_message",
+        ),
+        (
+            "foreign namespace",
+            b"<Notify_Request xmlns=\"urn:other\"/>".to_vec(),
+            "unsupported_message",
+        ),
+    ];
+    for (label, body, code) in &cases {
+        let (st, resp, _) = call(&env.app, bytes_post("/xml-in/erru/msg", body)).await;
+        assert_eq!(st, StatusCode::ACCEPTED, "{label}: {resp}");
+        let seen = seen.lock().unwrap();
+        let (msg, v) = seen.last().unwrap();
+        assert_eq!(msg, "_invalid", "{label}");
+        assert_eq!(v["schemaValid"], false, "{label}");
+        assert_eq!(v["service"], "erru/msg", "{label}");
+        assert_eq!(v["violations"], json!([{"code": code}]), "{label}: {v}");
+        assert_eq!(raw_of(v), *body, "{label}: exact bytes");
+        assert_eq!(v["sha256"].as_str().unwrap().len(), 64, "{label}");
+        for absent in ["message", "request", "rawXml"] {
+            assert!(v.get(absent).is_none(), "{label}: {absent} must be absent");
+        }
+    }
+    assert_eq!(seen.lock().unwrap().len(), cases.len());
+}
+
+#[tokio::test]
+async fn annotate_answers_a_dead_backend_with_a_gateway_error() {
+    let env = build(&annotate_sidecar("http://127.0.0.1:1/b"));
+    let (st, _, _) = call(&env.app, bytes_post("/xml-in/erru/msg", b"x")).await;
+    assert_eq!(st, StatusCode::BAD_GATEWAY);
+    let (st, _, _) = call(&env.app, xml_post("/xml-in/erru/msg", NOTIFY_INVALID)).await;
+    assert_eq!(st, StatusCode::BAD_GATEWAY);
+}
+
+#[tokio::test]
+async fn annotate_keeps_413_and_offline_503() {
+    let (backend, seen) = spawn_backend().await;
+    let env = build_opts(
+        &annotate_sidecar(&backend),
+        Opts {
+            max_request_bytes: Some(64),
+            ..Default::default()
+        },
+    );
+    let (st, _, _) = call(&env.app, xml_post("/xml-in/erru/msg", NOTIFY_XML)).await;
+    assert_eq!(st, StatusCode::PAYLOAD_TOO_LARGE);
+    let env = build_opts(
+        &annotate_sidecar(&backend),
+        Opts {
+            offline: true,
+            ..Default::default()
+        },
+    );
+    for body in [NOTIFY_XML, NOTIFY_INVALID, "not xml"] {
+        let (st, _, _) = call(&env.app, xml_post("/xml-in/erru/msg", body)).await;
+        assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    }
+    assert!(seen.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn other_modes_keep_answering_4xx_for_unparsable_input() {
+    for mode in ["{inbound: enforce}", "{inbound: report}", "{inbound: off}"] {
+        let (backend, seen) = spawn_backend().await;
+        let env = build(&with_validate(&inbound_sidecar(&backend), mode));
+        let (st, _, _) = call(&env.app, bytes_post("/xml-in/erru/msg", b"hello")).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{mode}");
+        assert!(seen.lock().unwrap().is_empty(), "{mode}");
+    }
+}
+
+#[test]
+fn annotate_boot_rules() {
+    let msgs = "schemas: [Msg.xsd]\nmessages:\n  Notify_Request: {}\n";
+    // Outbound cannot annotate.
+    let e = load_err(&with_validate(
+        &format!(
+            "{msgs}inbound: {{backend: 'http://b'}}\noutbound: {{url: 'http://localhost:1/x'}}\n"
+        ),
+        "{outbound: annotate}",
+    ));
+    assert!(e.contains("annotate") && e.contains("outbound"), "{e}");
+    // A message with `forward` cannot annotate.
+    let e = load_err(&with_validate(
+        "schemas: [Msg.xsd]\nmessages:\n  Notify_Request:\n    forward: 'http://old/x'\n  Other_Request: {}\ninbound: {backend: 'http://b'}\n",
+        "{inbound: annotate}",
+    ));
+    assert!(e.contains("annotate") && e.contains("forward"), "{e}");
+    // `_invalid` needs a target: `inbound.backend` is required.
+    let e = load_err(&with_validate(
+        "schemas: [Msg.xsd]\nmessages:\n  Notify_Request:\n    backend: 'http://b/x'\ninbound: {}\n",
+        "{inbound: annotate}",
+    ));
+    assert!(
+        e.contains("annotate") && e.contains("inbound.backend"),
+        "{e}"
+    );
+    // A message named `_invalid` clashes with the route.
+    let e = load_err(&with_validate(
+        "schemas: [Msg.xsd]\nmessages:\n  Notify_Request: {}\n  _invalid: {}\ninbound: {backend: 'http://b'}\n",
+        "{inbound: annotate}",
+    ));
+    assert!(e.contains("_invalid"), "{e}");
+    // A plain annotate lane boots.
+    let ok = write_lane(&with_validate(
+        "schemas: [Msg.xsd]\nmessages:\n  Notify_Request: {}\ninbound: {backend: 'http://b'}\n",
+        "{inbound: annotate}",
+    ));
+    let dsl = TempDir::new().unwrap();
+    assert!(xmllane::load_all(Some(ok.path()), &cfg_for(&ok, &dsl)).is_ok());
+}
