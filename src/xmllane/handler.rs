@@ -180,10 +180,10 @@ fn judge(
         .map(|v| format!("{}:{}", v.path, v.code))
         .collect();
     if mode == ValidateMode::Enforce {
-        tracing::warn!(group, name, message, direction, violations = ?summary, "XSD validation refused the message");
+        tracing::warn!(group, name, msg_type = message, direction, violations = ?summary, "XSD validation refused the message");
         Some(schema_invalid(violations))
     } else {
-        tracing::warn!(group, name, message, direction, violations = ?summary, "XSD validation (report): the message does not conform");
+        tracing::warn!(group, name, msg_type = message, direction, violations = ?summary, "XSD validation (report): the message does not conform");
         None
     }
 }
@@ -296,7 +296,7 @@ async fn handle_inbound(
     };
     match gate(svc.sidecar.validate.inbound, svc.model.as_deref(), &root) {
         Err(()) => {
-            tracing::error!(group, name, message = ?root.local, "XSD validator failed");
+            tracing::error!(group, name, msg_type = ?root.local, "XSD validator failed");
             return err(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "validator_failed",
