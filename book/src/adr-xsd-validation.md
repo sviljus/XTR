@@ -70,6 +70,13 @@ Reasons:
 5. Answers: an invalid message gets HTTP 422 `schema_invalid`. An invalid
    outbound request does not go to the peer. An internal validator error gets
    HTTP 500 `validator_failed`; the details go to the log only.
+   HTTP 422 is an HTTP-level answer. Use `enforce` on inbound only where the
+   protocol of the peer accepts a 4xx answer. A protocol that needs an
+   application-level error message for an invalid message (for example the
+   ERRU `ErrorNotification` with the status `InvalidFormat`) keeps
+   `inbound: report`. A later mode can pass the violations to the backend, so
+   that the backend sends the error message. That mode is not part of this
+   decision.
 6. An error names the element path, a rule code and the schema file and line.
    It never contains the value from the message. The file name is relative
    to the schema directory. An answer has at most 10 errors.

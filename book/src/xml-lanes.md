@@ -55,8 +55,8 @@ declaration, is accepted.
 ## Layout and sidecar
 
 ```text
-wsdl/<group>/<name>.xml.yaml     # the sidecar (<group> subdirectory is required)
-wsdl/<group>/*.xsd               # entry XSDs + local includes/imports
+wsdl/<group>/<name>.xml.yaml     # the sidecar (<group> subdirectory is required; `.xml.yml` also works)
+wsdl/<group>/*.xsd               # entry XSDs + local includes (see "Supported XSD" for imports)
 ```
 
 `<group>/<name>` become the endpoint names. Nested directories are joined
@@ -89,8 +89,8 @@ outbound:
   content_type: application/xml; charset=utf-8
 
 validate:                    # XSD validation, see "XSD validation"
-  inbound: enforce           # off | report | enforce (default enforce)
-  outbound: enforce
+  inbound: report            # off | report | enforce (default enforce)
+  outbound: report           # do not copy enforce to production before "Turning on enforce"
 ```
 
 Boot is refused, and XTR prints the full list of faults, for each of
@@ -247,13 +247,17 @@ status is always returned, whatever the body looks like.
 
 XTR validates inbound messages and outbound requests against the XSD
 of the lane. The validator is written in Rust. It reads the same XSD
-files as the codec and the same element tree as the codec.
-Validation of the responses of a peer is not covered.
+files and the same element tree as the codec. XTR does not validate the
+responses of a peer.
+
+### Modes
+
+Set the mode for each direction in the sidecar:
 
 ```yaml
 validate:
-  inbound: enforce    # off | report | enforce
-  outbound: enforce
+  inbound: report    # off | report | enforce (default enforce)
+  outbound: report   # a missing key means enforce; see "Rolling out a version with validation"
 ```
 
 A missing key means `enforce`.
@@ -264,40 +268,102 @@ A missing key means `enforce`.
 | `report` | XTR logs the violations and passes the message on. |
 | `off` | XTR does not validate. |
 
-Use `report` only in a test environment and for a limited time. `xtr doctor`
-reports a lane with `off` or `report` as WEAK.
+`enforce` answers HTTP 422. Use it only where the protocol of the peer
+accepts a 4xx answer. Some protocols need an application-level error
+message for an invalid message. The ERRU protocol is an example: the
+receiver answers 200 or 202 and sends an `ErrorNotification` with the
+status `InvalidFormat`. Keep `inbound: report` for such a lane. Do not
+use `enforce` on it until the backend can send the error message itself.
 
-An existing lane validates from this version on, because a missing key means
-`enforce`. Until a differential test against a second XSD processor shows no
-differences for your schemas, set `validate: report` in the sidecar of a
-production lane. Then the choice is written down and visible. Move to `enforce`
-when the differential test shows no differences for your schemas and the logs
-show no unexpected violations.
+`xtr doctor` reports a direction with `off` or `report` as WEAK. Use
+`report` for a limited time, as a step in a roll-out. It is not a
+permanent setting for a lane that must refuse invalid messages.
 
-**Roll out.** Before you roll out a version with validation, add
-`validate: report` to every raw-XML sidecar. Run `xtr doctor` of the new
-version on the sidecar directory. It must list every raw-XML lane with
-`report`. Then roll out, and switch one lane at a time to `enforce` after the
-conditions above are met.
+### Rolling out a version with validation
 
-**Logs.** Boot logs the validation mode of each lane at info level. A violation
-writes a warn entry with the element paths and the rule codes, never a value.
-The log is rate capped per lane: at most 10 entries per minute. The first
-entry of the next minute has a `suppressed` count of the entries that XTR
-dropped. The answer to the sender is not capped.
+An existing lane validates from this version on, because a missing key
+means `enforce`. Do the steps in this order:
 
-**Inbound.** XTR validates the message before it calls the backend and
-before `forward`. A message that breaks the XSD gets HTTP 422
-`schema_invalid`. XTR does not call the backend or forward the message.
+1. Add `validate: report` for both directions to every raw-XML sidecar.
+   This applies to `.xml.yaml` and `.xml.yml` files.
+2. Run `xtr doctor` of the new version on the sidecar directory. It must
+   list every raw-XML lane with `report`.
+3. Roll out the new version.
+4. Read the logs (see "Logs"). Decide for each violation if the peer or
+   the validator is wrong.
+5. Turn on `enforce` for one lane and one direction at a time. See
+   "Turning on enforce".
 
-**Outbound.** XTR validates the serialized request, the bytes that go to the
-peer. A request that breaks the XSD gets HTTP 422 `schema_invalid` to the
-caller. XTR does not send it.
+### Turning on enforce
 
-An internal error of the validator gives HTTP 500 `validator_failed`. The
-details go to the log only.
+Do this only when **all** of these conditions are true:
 
-**Answer.** The body lists at most 10 violations:
+1. A differential test for the schemas of the lane shows 0 differences.
+   The test compares XTR with an independent XSD 1.0 processor (for
+   example Apache Xerces). The test uses sample messages and generated
+   invalid messages. Write down the date and the XTR version.
+2. The lane has run in `report` in production for the agreed period. The
+   period includes at least one real message of each message type. Every
+   logged violation is explained: it is a fault of the peer, or it is a
+   fault of the validator and the validator is fixed first.
+3. `xtr doctor` lists the lane as `report`. The boot log shows the mode.
+4. The log entries of the last period have `suppressed` equal to 0 (see
+   "Logs"). A non-zero count means that the log hides violations.
+5. For `inbound`: the protocol of the peer accepts an HTTP 4xx answer to
+   an invalid message (see "Modes").
+
+Turn on `outbound` first. An invalid outbound request is a fault of the
+own system, and the effect stays with the own caller. Then turn on
+`inbound`. Make each direction a separate change.
+
+**What changes with `enforce`.**
+
+* Inbound: XTR answers an invalid message with HTTP 422 `schema_invalid`.
+  XTR does not call the backend and does not forward the message. XTR
+  does not store the message. A message with a `forward` no longer
+  reaches the old system when it is invalid.
+* Outbound: XTR answers the caller with HTTP 422 `schema_invalid`. XTR
+  sends nothing to the peer.
+* The WEAK finding of `xtr doctor` for this direction disappears. The boot does
+  not change, because XTR builds the model also for `report`.
+* A validator error gives HTTP 500 `validator_failed`. XTR refuses the
+  message (fail closed).
+
+**Check after the change.** Read the boot log and the output of
+`xtr doctor`. Count the 422 and 500 answers in the first days. If the
+count is not as expected, roll back.
+
+**Roll back.** Set the direction to `report` and restart XTR. No data is
+lost. For an inbound lane, the peer must send again the messages that
+XTR refused during `enforce`. This applies only to a protocol where a
+4xx answer makes the peer send again.
+
+**Who decides.** The change to `enforce` is a separate change with its
+own review. Attach the evidence of conditions 1 and 2 to it.
+
+### Inbound
+
+XTR validates the message after the prolog and the root checks and
+before it calls the backend and before `forward`. A message that breaks
+the XSD gets HTTP 422 `schema_invalid`. XTR does not call the backend
+and does not forward the message.
+
+The backend can also relay a 422 (see `relay_statuses`). The peer sees
+the same status for both cases. The `error` field of the body is the
+only difference: it is `schema_invalid` when XTR refuses the message.
+
+### Outbound
+
+XTR validates the serialized request, which are the bytes that go to the
+peer. A request that breaks the XSD gets HTTP 422 `schema_invalid` to
+the caller. XTR does not send it.
+
+### Answer
+
+An internal error of the validator gives HTTP 500 `validator_failed`.
+The details go to the log only.
+
+The body of a 422 lists at most 10 violations:
 
 ```json
 {
@@ -310,30 +376,49 @@ details go to the log only.
 }
 ```
 
-A violation holds the element path, a rule code, the line in the message, and
-the file and line in the schema. It never holds a value from the message.
-The schema file name is relative to the schema directory.
+A violation holds these fields:
 
-Rule codes: `root_unknown`, `element_unexpected`, `element_missing`,
-`attribute_unexpected`, `attribute_missing`, `attribute_fixed`,
-`xsi_not_allowed`, `text_not_allowed`, `simple_content_expected`,
-`type_invalid`, `enumeration`, `pattern`, `length`, `min_length`,
-`max_length`, `min_inclusive`.
+* `path`: the element path.
+* `code`: a rule code (see "Rule codes").
+* `line`: the line in the message where the start tag of the element is.
+  The value 0 means that the line is not known.
+* `schemaFile` and `schemaLine`: the file and the line in the schema.
+  The file name is relative to the schema directory.
 
-**Supported XSD.** `xs:include`, `xs:sequence`, `xs:choice`, `xs:extension`,
+A violation never holds a value from the message.
+
+### Rule codes
+
+| Code | Meaning |
+|------|---------|
+| `root_unknown` | The root element is not a message of the lane. |
+| `element_missing` | A required element is missing. |
+| `element_unexpected` | An element is not allowed at this place. |
+| `attribute_missing` | A required attribute is missing. |
+| `attribute_unexpected` | An attribute is not declared. |
+| `attribute_fixed` | An attribute differs from its `fixed` value. |
+| `xsi_not_allowed` | The message has `xsi:type` or `xsi:nil`. |
+| `text_not_allowed` | An element with element-only content has text. |
+| `simple_content_expected` | An element with simple content has a child element. |
+| `type_invalid` | The value is not valid for its built-in type. |
+| `enumeration` | The value is not in the enumeration. |
+| `pattern` | The value does not match the pattern. |
+| `length` | The value does not have the required length. |
+| `min_length` | The value is shorter than `minLength`. |
+| `max_length` | The value is longer than `maxLength`. |
+| `min_inclusive` | The value is smaller than `minInclusive`. |
+
+### Supported XSD
+
+XTR supports `xs:include`, `xs:sequence`, `xs:choice`, `xs:extension`,
 `xs:restriction`, `xs:attribute`, `xs:attributeGroup`, the facets
 `enumeration`, `whiteSpace`, `length`, `minLength`, `maxLength`,
 `minInclusive` and `pattern`, `fixed`, and the types `string`, `token`,
-`boolean`, `nonNegativeInteger`, `positiveInteger`, `date` and `dateTime`.
+`boolean`, `nonNegativeInteger`, `positiveInteger`, `date` and
+`dateTime`.
 
-**Boot.** When a lane validates, XTR builds the model at boot. A construct
-outside the supported XSD that a message root reaches stops the boot. The
-error names the file, the line and the construct. Also refused: an ambiguous
-content model (two particles with the same qualified name at one decision
-point), a duplicate global definition, an `xs:include` with another
-`targetNamespace`, a chameleon include, `maxOccurs="0"`, and a `pattern`
-that XSD does not define. Set `validate:` to `off` for the lane to boot
-without validation.
+`xs:import` is not supported. XTR treats it as a construct outside the
+supported XSD (see "Boot errors").
 
 **`xsi` attributes.** `xsi:type` and `xsi:nil` in a message are violations.
 `xsi:schemaLocation` and `xsi:noNamespaceSchemaLocation` are ignored. XTR
@@ -344,9 +429,41 @@ never loads a schema from a message.
 `\d` and `\w` use the XSD definitions. A construct of the `regex` syntax that
 XSD does not define is an error at boot.
 
+### Boot errors
+
+A boot error stops **all of XTR**, not only one lane. The error names the
+file, the line and the construct. A boot error occurs in these cases:
+
+* A direction that the lane serves has `report` or `enforce`, and a
+  construct outside the supported XSD is reachable from a message root.
+* The content model is ambiguous. Two particles with the same qualified
+  name stand at one decision point.
+* A global definition is duplicate.
+* An `xs:include` has another `targetNamespace`, or it is a chameleon
+  include.
+* An element has `maxOccurs="0"`.
+* A `pattern` uses a construct that XSD does not define.
+* The `validate:` section has an unknown key or an unknown mode.
+
+To start XTR without validation for a lane, set `validate:` to `off` for
+the directions of that lane.
+
+### Logs
+
+Boot logs the validation mode of each lane at info level. A violation
+writes a warn entry with the element paths and the rule codes. The entry
+never holds a value.
+
+XTR caps the warn log for each lane **and** each direction: at most 10
+entries per minute. The first entry of the next minute has a `suppressed`
+count of the entries that XTR dropped. The answer to the sender is not
+capped.
+
 ## Not covered
 
 * Validation of the responses of a peer.
+* XSD constructs outside the supported XSD. Each construct is a separate
+  piece of work. See the decision record
+  [XSD validation of raw-XML lanes](./adr-xsd-validation.md) for the
+  rules to extend the supported XSD.
 * Sync replies in the response body, SOAP, WS-Security, retries, queues.
-* `xtr doctor` only counts `.xml.yaml` lanes for the shared-listener
-  exposure check; sidecar contents are validated at boot.
