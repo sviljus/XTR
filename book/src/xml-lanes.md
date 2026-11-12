@@ -115,8 +115,11 @@ these cases:
 
 1. XTR reads the body. The body must be within
    `limits.max_request_bytes`. Otherwise XTR answers 413.
-2. XTR checks the body. The body must be UTF-8 XML. A `DOCTYPE` or DTD
-   is rejected with 400. This rule prevents XXE and entity expansion.
+2. XTR checks the body. The body must be UTF-8 XML. XTR answers 400
+   `unsupported_encoding` for an XML declaration with another encoding.
+   XTR answers 400 `malformed_xml` for a prolog that is not well-formed.
+   See "Encoding and prolog" above. A `DOCTYPE` or DTD is also rejected
+   with 400. This rule prevents XXE and entity expansion.
 3. The root element (local name **and** namespace) must be one of
    the `messages` that can arrive (`direction: in` or `both`).
    Otherwise XTR answers 400 `unsupported_message`.
@@ -187,7 +190,7 @@ backend. `forward` and `backend` are mutually exclusive per message.
   `application/xml`. (A relayed 4xx from a *backend* is different: XTR
   cuts that body, see the table above.)
 
-**Where the target is checked.**
+**Limits of `forward`.**
 
 * While `XTR_OFFLINE` is set, XTR blocks the forward (503 `offline`).
 * XTR checks only the scheme of the target URL, like backend URLs.
