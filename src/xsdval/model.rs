@@ -491,4 +491,46 @@ mod tests {
             upa(&m)
         );
     }
+
+    // ---- review findings I5 and I6 ----
+
+    #[test]
+    fn a_derived_type_cannot_loosen_white_space() {
+        let body = r#"
+          <xs:simpleType name="B"><xs:restriction base="xs:token"/></xs:simpleType>
+          <xs:simpleType name="V"><xs:restriction base="t:B"><xs:whiteSpace value="preserve"/></xs:restriction></xs:simpleType>
+          <xs:element name="Msg" type="t:V"/>"#;
+        let c = constructs(body, "Msg");
+        assert!(c.iter().any(|c| c.contains("whiteSpace")), "{c:?}");
+        let ok = r#"
+          <xs:simpleType name="B"><xs:restriction base="xs:string"><xs:whiteSpace value="replace"/></xs:restriction></xs:simpleType>
+          <xs:simpleType name="V"><xs:restriction base="t:B"><xs:whiteSpace value="collapse"/></xs:restriction></xs:simpleType>
+          <xs:element name="Msg" type="t:V"/>"#;
+        assert!(try_build(ok, "Msg").is_ok());
+        let same = r#"<xs:simpleType name="V"><xs:restriction base="xs:token"><xs:whiteSpace value="collapse"/></xs:restriction></xs:simpleType>
+          <xs:element name="Msg" type="t:V"/>"#;
+        assert!(try_build(same, "Msg").is_ok());
+    }
+
+    #[test]
+    fn enumeration_and_length_facets_on_a_non_string_base_are_a_problem() {
+        for (base, facet) in [
+            ("xs:nonNegativeInteger", r#"<xs:enumeration value="1"/>"#),
+            ("xs:boolean", r#"<xs:enumeration value="true"/>"#),
+            ("xs:date", r#"<xs:enumeration value="2026-01-01"/>"#),
+            ("xs:positiveInteger", r#"<xs:maxLength value="3"/>"#),
+            ("xs:dateTime", r#"<xs:length value="20"/>"#),
+            ("xs:boolean", r#"<xs:minLength value="1"/>"#),
+        ] {
+            let body = format!(
+                r#"<xs:simpleType name="V"><xs:restriction base="{base}">{facet}</xs:restriction></xs:simpleType>
+                   <xs:element name="Msg" type="t:V"/>"#
+            );
+            let c = constructs(&body, "Msg");
+            assert!(!c.is_empty(), "{base} {facet} must be a problem");
+        }
+        let ok = r#"<xs:simpleType name="V"><xs:restriction base="xs:token"><xs:enumeration value="A"/><xs:maxLength value="3"/></xs:restriction></xs:simpleType>
+                    <xs:element name="Msg" type="t:V"/>"#;
+        assert!(try_build(ok, "Msg").is_ok());
+    }
 }
