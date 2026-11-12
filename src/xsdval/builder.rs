@@ -8,7 +8,7 @@
 
 use super::model::{
     AttributeDecl, Builtin, ComplexType, ElementDecl, Model, Occurs, Particle, Problem, SimpleType,
-    Step, TypeDef, WhiteSpace,
+    SrcLoc, Step, TypeDef, WhiteSpace,
 };
 use crate::inbound::contract::{QName, SchemaLoader, XSD_NS};
 use crate::inbound::dom::{self, Element};
@@ -395,6 +395,10 @@ impl<'a> Build<'a> {
                 local: name.to_string(),
             },
             ty: ty?,
+            loc: SrcLoc {
+                file: self.cur.0.clone(),
+                line: el.line,
+            },
         }))
     }
 
@@ -595,6 +599,10 @@ impl<'a> Build<'a> {
             ty: ty?,
             required,
             fixed: el.attr("fixed").map(String::from),
+            loc: SrcLoc {
+                file: self.cur.0.clone(),
+                line: el.line,
+            },
         })
     }
 
@@ -719,7 +727,13 @@ impl<'a> Build<'a> {
             }
         }
         let mut derived = (*base?).clone();
-        let mut step = Step::default();
+        let mut step = Step {
+            loc: SrcLoc {
+                file: self.cur.0.clone(),
+                line: el.line,
+            },
+            ..Step::default()
+        };
         for c in el.elements().filter(|c| is_xs(c)) {
             if matches!(c.local.as_str(), "annotation" | "simpleType") {
                 continue;
@@ -734,7 +748,10 @@ impl<'a> Build<'a> {
                     .enumeration
                     .get_or_insert_with(Vec::new)
                     .push(v.to_string()),
-                "pattern" => step.patterns.push(v.to_string()),
+                "pattern" => match super::pattern::compile(v) {
+                    Ok(re) => step.patterns.push(re),
+                    Err(e) => self.problem_at(c.line, format!("pattern: {e}")),
+                },
                 "whiteSpace" => match v {
                     "preserve" => derived.whitespace = WhiteSpace::Preserve,
                     "replace" => derived.whitespace = WhiteSpace::Replace,
@@ -749,7 +766,19 @@ impl<'a> Build<'a> {
                     },
                     Err(_) => self.problem(format!("xs:{} value", c.local)),
                 },
-                "minInclusive" => step.min_inclusive = Some(v.to_string()),
+                "minInclusive" => {
+                    if matches!(
+                        derived.base,
+                        Builtin::NonNegativeInteger
+                            | Builtin::PositiveInteger
+                            | Builtin::Date
+                            | Builtin::DateTime
+                    ) {
+                        step.min_inclusive = Some(v.to_string());
+                    } else {
+                        self.problem_at(c.line, "xs:minInclusive on this base type");
+                    }
+                }
                 other => self.problem_at(c.line, format!("xs:{other}")),
             }
         }

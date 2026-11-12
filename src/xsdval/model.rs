@@ -35,11 +35,20 @@ pub fn build(
     super::builder::run(entries, loader, roots)
 }
 
+/// Position in a schema file.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SrcLoc {
+    /// File name as the loader gave it, never an absolute path.
+    pub file: String,
+    pub line: u32,
+}
+
 /// Element declaration.
 #[derive(Debug)]
 pub struct ElementDecl {
     pub name: QName,
     pub ty: TypeDef,
+    pub loc: SrcLoc,
 }
 
 #[derive(Debug, Clone)]
@@ -86,6 +95,7 @@ pub struct AttributeDecl {
     pub ty: Arc<SimpleType>,
     pub required: bool,
     pub fixed: Option<String>,
+    pub loc: SrcLoc,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -112,11 +122,13 @@ pub enum WhiteSpace {
 #[derive(Debug, Clone, Default)]
 pub struct Step {
     pub enumeration: Option<Vec<String>>,
-    pub patterns: Vec<String>,
+    pub patterns: Vec<regex::Regex>,
     pub length: Option<usize>,
     pub min_length: Option<usize>,
     pub max_length: Option<usize>,
     pub min_inclusive: Option<String>,
+    /// Where this step is declared in a schema file.
+    pub loc: SrcLoc,
 }
 
 #[derive(Debug, Clone)]
