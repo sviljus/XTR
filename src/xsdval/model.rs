@@ -254,4 +254,126 @@ mod tests {
         let body = r#"<xs:element name="Msg" type="xs:string"/>"#;
         assert!(try_build(body, "Nope").is_err());
     }
+
+    // ---- unique particle attribution (UPA) ----
+
+    const UPA: &str = "ambiguous content model";
+
+    fn upa(body: &str) -> Vec<String> {
+        constructs(body, "Msg")
+    }
+
+    fn el(n: &str, extra: &str) -> String {
+        format!(r#"<xs:element name="{n}" type="xs:string" {extra}/>"#)
+    }
+
+    fn msg(model: &str) -> String {
+        format!(r#"<xs:element name="Msg"><xs:complexType>{model}</xs:complexType></xs:element>"#)
+    }
+
+    #[test]
+    fn upa_two_branches_of_a_choice_with_the_same_name_stop_the_build() {
+        let m = msg(&format!(
+            "<xs:choice>{}{}</xs:choice>",
+            el("a", ""),
+            el("a", "")
+        ));
+        assert_eq!(upa(&m), vec![UPA.to_string()]);
+    }
+
+    #[test]
+    fn upa_optional_element_before_the_same_name_in_a_sequence_stops_the_build() {
+        let m = msg(&format!(
+            r#"<xs:sequence>{}{}</xs:sequence>"#,
+            el("a", r#"minOccurs="0""#),
+            el("a", "")
+        ));
+        assert_eq!(upa(&m), vec![UPA.to_string()]);
+    }
+
+    #[test]
+    fn upa_across_the_extension_boundary_stops_the_build() {
+        let body = format!(
+            r#"<xs:complexType name="Base"><xs:sequence>{}</xs:sequence></xs:complexType>
+               <xs:element name="Msg"><xs:complexType><xs:complexContent>
+                 <xs:extension base="t:Base"><xs:sequence>{}</xs:sequence></xs:extension>
+               </xs:complexContent></xs:complexType></xs:element>"#,
+            el("a", r#"minOccurs="0""#),
+            el("a", "")
+        );
+        assert_eq!(upa(&body), vec![UPA.to_string()]);
+    }
+
+    #[test]
+    fn upa_through_an_empty_group_stops_the_build() {
+        let m = msg(&format!(
+            r#"<xs:sequence>{}<xs:sequence/>{}</xs:sequence>"#,
+            el("a", r#"minOccurs="0""#),
+            el("a", "")
+        ));
+        assert_eq!(upa(&m), vec![UPA.to_string()]);
+        let m = msg(&format!(
+            r#"<xs:sequence>{}<xs:sequence minOccurs="0">{}</xs:sequence>{}</xs:sequence>"#,
+            el("a", r#"minOccurs="0""#),
+            el("b", ""),
+            el("a", "")
+        ));
+        assert_eq!(upa(&m), vec![UPA.to_string()]);
+    }
+
+    #[test]
+    fn upa_a_repeated_group_whose_first_set_meets_the_follow_set_stops_the_build() {
+        let m = msg(&format!(
+            r#"<xs:sequence><xs:sequence maxOccurs="unbounded">{}{}</xs:sequence>{}</xs:sequence>"#,
+            el("a", ""),
+            el("b", r#"minOccurs="0""#),
+            el("a", "")
+        ));
+        assert_eq!(upa(&m), vec![UPA.to_string()]);
+    }
+
+    #[test]
+    fn upa_an_element_that_repeats_meets_the_same_name_after_it() {
+        let m = msg(&format!(
+            r#"<xs:sequence>{}{}</xs:sequence>"#,
+            el("a", r#"maxOccurs="unbounded""#),
+            el("a", "")
+        ));
+        assert_eq!(upa(&m), vec![UPA.to_string()]);
+    }
+
+    #[test]
+    fn upa_unambiguous_models_build() {
+        let ok = [
+            format!("<xs:sequence>{}{}</xs:sequence>", el("a", ""), el("b", "")),
+            format!("<xs:choice>{}{}</xs:choice>", el("a", ""), el("b", "")),
+            format!(
+                r#"<xs:sequence>{}{}</xs:sequence>"#,
+                el("a", r#"maxOccurs="unbounded""#),
+                el("b", "")
+            ),
+            format!(
+                r#"<xs:sequence maxOccurs="unbounded">{}{}</xs:sequence>"#,
+                el("a", ""),
+                el("b", "")
+            ),
+            format!(
+                r#"<xs:sequence>{}{}{}</xs:sequence>"#,
+                el("a", r#"minOccurs="0""#),
+                el("b", r#"minOccurs="0""#),
+                el("c", "")
+            ),
+            format!(
+                r#"<xs:sequence>{}<xs:choice>{}{}</xs:choice>{}</xs:sequence>"#,
+                el("a", ""),
+                el("b", ""),
+                el("c", ""),
+                el("d", "")
+            ),
+        ];
+        for model in ok {
+            let m = msg(&model);
+            assert!(try_build(&m, "Msg").is_ok(), "{model}");
+        }
+    }
 }
