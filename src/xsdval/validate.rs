@@ -426,7 +426,7 @@ fn normalize(ty: &SimpleType, raw: &str) -> String {
     }
 }
 
-fn lexical_ok(base: Builtin, v: &str) -> bool {
+pub(super) fn lexical_ok(base: Builtin, v: &str) -> bool {
     match base {
         Builtin::String | Builtin::Token => true,
         Builtin::Boolean => matches!(v, "true" | "false" | "1" | "0"),
