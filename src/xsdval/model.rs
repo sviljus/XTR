@@ -13,6 +13,8 @@ pub struct Problem {
     pub component: String,
     /// The unsupported construct, for example `xs:any`.
     pub construct: String,
+    /// Line in `file`, counted from 1. `0` means unknown.
+    pub line: u32,
 }
 
 /// Validation model of the messages of one lane.
@@ -375,5 +377,106 @@ mod tests {
             let m = msg(&model);
             assert!(try_build(&m, "Msg").is_ok(), "{model}");
         }
+    }
+
+    // ---- review findings B1 to B4 ----
+
+    fn build_files(files: &[(&str, &str)], entry: &str, root: &str) -> Result<Model, Vec<Problem>> {
+        let map: std::collections::HashMap<String, String> = files
+            .iter()
+            .map(|(n, c)| (n.to_string(), c.to_string()))
+            .collect();
+        let loader = move |loc: &str| {
+            let name = loc.rsplit('/').next()?.to_string();
+            map.get(&name)
+                .map(|c| (name.clone(), PathBuf::from(&name), c.clone()))
+        };
+        let entry_xml = files
+            .iter()
+            .find(|(n, _)| *n == entry)
+            .unwrap()
+            .1
+            .to_string();
+        build(&[(entry.to_string(), entry_xml)], &loader, &[root])
+    }
+
+    #[test]
+    fn a_problem_carries_the_line_of_the_construct() {
+        let xsd = format!(
+            "<xs:schema {XS}>\n<xs:complexType name=\"T\">\n  <xs:sequence>\n    <xs:any/>\n  </xs:sequence>\n</xs:complexType>\n<xs:element name=\"Msg\" type=\"t:T\"/>\n</xs:schema>"
+        );
+        let p = build(&[("m.xsd".into(), xsd)], &no_files, &["Msg"]).unwrap_err();
+        assert_eq!((p[0].construct.as_str(), p[0].line), ("xs:any", 4));
+    }
+
+    #[test]
+    fn a_global_definition_that_occurs_twice_is_a_problem() {
+        let body = r#"<xs:complexType name="T"><xs:sequence/></xs:complexType>
+          <xs:complexType name="T"><xs:sequence><xs:element name="a" type="xs:string"/></xs:sequence></xs:complexType>
+          <xs:element name="Msg" type="t:T"/>"#;
+        let c = constructs(body, "Msg");
+        assert!(
+            c.iter().any(|c| c.starts_with("duplicate definition")),
+            "{c:?}"
+        );
+        let body =
+            r#"<xs:element name="Msg" type="xs:string"/><xs:element name="Msg" type="xs:token"/>"#;
+        let c = constructs(body, "Msg");
+        assert!(
+            c.iter().any(|c| c.starts_with("duplicate definition")),
+            "{c:?}"
+        );
+    }
+
+    #[test]
+    fn a_duplicate_across_an_include_is_a_problem() {
+        let main = format!(
+            r#"<xs:schema {XS}><xs:include schemaLocation="inc.xsd"/><xs:simpleType name="S"><xs:restriction base="xs:string"/></xs:simpleType><xs:element name="Msg" type="t:S"/></xs:schema>"#
+        );
+        let inc = format!(
+            r#"<xs:schema {XS}><xs:simpleType name="S"><xs:restriction base="xs:token"/></xs:simpleType></xs:schema>"#
+        );
+        let r = build_files(&[("main.xsd", &main), ("inc.xsd", &inc)], "main.xsd", "Msg");
+        let c: Vec<String> = r.unwrap_err().into_iter().map(|p| p.construct).collect();
+        assert!(
+            c.iter().any(|c| c.starts_with("duplicate definition")),
+            "{c:?}"
+        );
+    }
+
+    #[test]
+    fn an_include_with_another_target_namespace_is_a_problem() {
+        let main = format!(
+            r#"<xs:schema {XS}><xs:include schemaLocation="inc.xsd"/><xs:element name="Msg" type="xs:string"/></xs:schema>"#
+        );
+        let inc = r#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" targetNamespace="urn:other"><xs:simpleType name="S"><xs:restriction base="xs:string"/></xs:simpleType></xs:schema>"#;
+        let r = build_files(&[("main.xsd", &main), ("inc.xsd", inc)], "main.xsd", "Msg");
+        let c: Vec<String> = r.unwrap_err().into_iter().map(|p| p.construct).collect();
+        assert!(c.iter().any(|c| c.contains("targetNamespace")), "{c:?}");
+    }
+
+    #[test]
+    fn a_chameleon_include_is_a_problem() {
+        let main = format!(
+            r#"<xs:schema {XS}><xs:include schemaLocation="inc.xsd"/><xs:element name="Msg" type="xs:string"/></xs:schema>"#
+        );
+        let inc = r#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"><xs:simpleType name="S"><xs:restriction base="xs:string"/></xs:simpleType></xs:schema>"#;
+        let r = build_files(&[("main.xsd", &main), ("inc.xsd", inc)], "main.xsd", "Msg");
+        let c: Vec<String> = r.unwrap_err().into_iter().map(|p| p.construct).collect();
+        assert!(c.iter().any(|c| c.contains("chameleon")), "{c:?}");
+    }
+
+    #[test]
+    fn max_occurs_zero_is_a_problem() {
+        let m = msg(&format!(
+            r#"<xs:sequence>{}{}</xs:sequence>"#,
+            el("a", r#"maxOccurs="0" minOccurs="0""#),
+            el("b", "")
+        ));
+        assert!(
+            upa(&m).iter().any(|c| c.contains("maxOccurs")),
+            "{:?}",
+            upa(&m)
+        );
     }
 }
