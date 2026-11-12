@@ -285,7 +285,10 @@ impl LogLimit {
     }
 
     fn check_at(&self, now: std::time::Instant) -> Option<u32> {
-        let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        let mut st = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let new_window = st
             .window_start
             .is_none_or(|s| now.saturating_duration_since(s) >= LOG_WINDOW);

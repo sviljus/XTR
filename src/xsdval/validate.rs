@@ -6,8 +6,8 @@
 //! the schema. It never holds a value from the message.
 
 use super::model::{
-    AttributeDecl, Builtin, ComplexType, ElementDecl, Model, Particle, SimpleType, SrcLoc, TypeDef,
-    WhiteSpace,
+    AttributeDecl, Builtin, ComplexType, ElementDecl, Model, Occurs, Particle, SimpleType, SrcLoc,
+    TypeDef, WhiteSpace,
 };
 use crate::inbound::dom::{Element, Node};
 use std::borrow::Cow;
@@ -255,63 +255,97 @@ impl Walk {
             return false;
         }
         match p {
-            Particle::Element { decl, occurs } => {
-                let mut count = 0u32;
-                while *pos < m.kids.len()
-                    && occurs.max.is_none_or(|mx| count < mx)
-                    && names_match(decl, m.kids[*pos])
-                {
-                    path.push(Seg {
-                        name: Cow::Borrowed(&m.kids[*pos].local),
-                        idx: m.segs[*pos],
-                    });
-                    self.element(decl, m.kids[*pos], path);
-                    path.pop();
-                    *pos += 1;
-                    count += 1;
-                }
-                if count < occurs.min {
-                    self.fail(m, *pos, path, Some(decl));
-                    return false;
-                }
-                true
-            }
+            Particle::Element { decl, occurs } => self.element_particle(decl, occurs, m, pos, path),
             Particle::Sequence { items, occurs } | Particle::Choice { items, occurs } => {
-                let is_choice = matches!(p, Particle::Choice { .. });
-                let mut reps = 0u32;
-                loop {
-                    if occurs.max.is_some_and(|mx| reps >= mx) {
-                        break;
-                    }
-                    let starts = *pos < m.kids.len() && can_start(p, m.kids[*pos]);
-                    if reps >= occurs.min && !starts {
-                        break;
-                    }
-                    let before = *pos;
-                    let ok = if is_choice {
-                        match items
-                            .iter()
-                            .find(|i| *pos < m.kids.len() && can_start(i, m.kids[*pos]))
-                        {
-                            Some(branch) => self.particle(branch, m, pos, path),
-                            None if items.iter().any(nullable) => true,
-                            None => {
-                                self.fail(m, *pos, path, None);
-                                false
-                            }
-                        }
-                    } else {
-                        items.iter().all(|i| self.particle(i, m, pos, path))
-                    };
-                    if !ok {
-                        return false;
-                    }
-                    reps += 1;
-                    if *pos == before {
-                        break;
-                    }
-                }
-                true
+                self.group_particle(p, items, occurs, m, pos, path)
+            }
+        }
+    }
+
+    /// An element particle: match the element as often as the occurrence allows.
+    fn element_particle<'a>(
+        &mut self,
+        decl: &ElementDecl,
+        occurs: &Occurs,
+        m: &mut Match<'_, 'a>,
+        pos: &mut usize,
+        path: &mut Vec<Seg<'a>>,
+    ) -> bool {
+        let mut count = 0u32;
+        while *pos < m.kids.len()
+            && occurs.max.is_none_or(|mx| count < mx)
+            && names_match(decl, m.kids[*pos])
+        {
+            path.push(Seg {
+                name: Cow::Borrowed(&m.kids[*pos].local),
+                idx: m.segs[*pos],
+            });
+            self.element(decl, m.kids[*pos], path);
+            path.pop();
+            *pos += 1;
+            count += 1;
+        }
+        if count < occurs.min {
+            self.fail(m, *pos, path, Some(decl));
+            return false;
+        }
+        true
+    }
+
+    /// A sequence or a choice. `p` is the group, `items` its particles.
+    fn group_particle<'a>(
+        &mut self,
+        p: &Particle,
+        items: &[Particle],
+        occurs: &Occurs,
+        m: &mut Match<'_, 'a>,
+        pos: &mut usize,
+        path: &mut Vec<Seg<'a>>,
+    ) -> bool {
+        let is_choice = matches!(p, Particle::Choice { .. });
+        let mut reps = 0u32;
+        loop {
+            if occurs.max.is_some_and(|mx| reps >= mx) {
+                break;
+            }
+            let starts = *pos < m.kids.len() && can_start(p, m.kids[*pos]);
+            if reps >= occurs.min && !starts {
+                break;
+            }
+            let before = *pos;
+            let ok = if is_choice {
+                self.choice_once(items, m, pos, path)
+            } else {
+                items.iter().all(|i| self.particle(i, m, pos, path))
+            };
+            if !ok {
+                return false;
+            }
+            reps += 1;
+            if *pos == before {
+                break;
+            }
+        }
+        true
+    }
+
+    /// One pass of a choice: the branch that can start at the current element.
+    fn choice_once<'a>(
+        &mut self,
+        items: &[Particle],
+        m: &mut Match<'_, 'a>,
+        pos: &mut usize,
+        path: &mut Vec<Seg<'a>>,
+    ) -> bool {
+        let branch = items
+            .iter()
+            .find(|i| *pos < m.kids.len() && can_start(i, m.kids[*pos]));
+        match branch {
+            Some(branch) => self.particle(branch, m, pos, path),
+            None if items.iter().any(nullable) => true,
+            None => {
+                self.fail(m, *pos, path, None);
+                false
             }
         }
     }
