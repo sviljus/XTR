@@ -1388,7 +1388,10 @@ fn an_unsupported_xsd_construct_refuses_boot_unless_validation_is_off() {
     assert!(e.contains("Msg.xsd:"), "names the file and the line: {e}");
     let xsd = write(&with_validate(base, "{inbound: off, outbound: off}"));
     assert!(xmllane::load_all(Some(xsd.path()), &cfg_for(&xsd, &dsl)).is_ok());
-    // The same schema in a lane with enforce in one direction still fails.
-    let xsd = write(&with_validate(base, "{inbound: off}"));
+    // A lane with both directions needs the model while one direction validates.
+    let both = "schemas: [Msg.xsd]\nmessages: {Notify_Request: {}}\ninbound: {backend: 'http://b'}\noutbound: {url: 'http://localhost:1/x'}\n";
+    let xsd = write(&with_validate(both, "{inbound: off}"));
     assert!(xmllane::load_all(Some(xsd.path()), &cfg_for(&xsd, &dsl)).is_err());
+    let xsd = write(&with_validate(both, "{inbound: off, outbound: off}"));
+    assert!(xmllane::load_all(Some(xsd.path()), &cfg_for(&xsd, &dsl)).is_ok());
 }
