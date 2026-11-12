@@ -790,7 +790,15 @@ impl<'a> Build<'a> {
                             | Builtin::Date
                             | Builtin::DateTime
                     ) {
-                        step.min_inclusive = Some(v.to_string());
+                        // The bound must be a value of the base type.
+                        if super::validate::lexical_ok(derived.base, v.trim()) {
+                            step.min_inclusive = Some(v.trim().to_string());
+                        } else {
+                            self.problem_at(
+                                c.line,
+                                "xs:minInclusive value does not fit the base type",
+                            );
+                        }
                     } else {
                         self.problem_at(c.line, "xs:minInclusive on this base type");
                     }
