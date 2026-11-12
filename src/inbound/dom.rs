@@ -39,6 +39,9 @@ pub struct Element {
     /// in source order — re-emitted by `serialize` so declarations that
     /// are only used inside attribute values (QNames) are not lost.
     pub decls: Vec<(String, String)>,
+    /// Line of the start tag in the source document, counted from 1.
+    /// `0` means unknown (an element that the parser did not create).
+    pub line: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -445,6 +448,7 @@ fn open_element(e: &BytesStart, parent_scope: Scope) -> Result<Element, DomError
         children: Vec::new(),
         scope,
         decls,
+        line: 0,
     })
 }
 
@@ -565,6 +569,66 @@ fn write_el(el: &Element, out: &mut String, scope: &mut Vec<(String, String)>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn lines(xml: &str) -> Vec<(String, u32)> {
+        fn walk(e: &Element, out: &mut Vec<(String, u32)>) {
+            out.push((e.local.clone(), e.line));
+            for c in e.elements() {
+                walk(c, out);
+            }
+        }
+        let mut out = Vec::new();
+        walk(&parse(xml).unwrap(), &mut out);
+        out
+    }
+
+    #[test]
+    fn element_line_counts_from_one_and_follows_line_feeds() {
+        let got = lines("<a>\n  <b/>\n\n  <c>\n    <d/>\n  </c>\n</a>");
+        let want = [("a", 1), ("b", 2), ("c", 4), ("d", 5)];
+        let want: Vec<(String, u32)> = want.iter().map(|(n, l)| (n.to_string(), *l)).collect();
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn element_line_counts_crlf_once_and_a_lone_cr_as_a_line_end() {
+        let got = lines("<a>\r\n<b/>\r\n<c/>\r<d/>\n</a>");
+        let n: Vec<(&str, u32)> = got.iter().map(|(n, l)| (n.as_str(), *l)).collect();
+        assert_eq!(n, [("a", 1), ("b", 2), ("c", 3), ("d", 4)]);
+    }
+
+    #[test]
+    fn element_line_is_the_line_of_the_start_tag_also_for_a_multiline_tag() {
+        let got = lines("<a\n  x=\"1\"\n  y=\"2\">\n<b\n  z=\"3\"/>\n<c/></a>");
+        let n: Vec<(&str, u32)> = got.iter().map(|(n, l)| (n.as_str(), *l)).collect();
+        assert_eq!(n, [("a", 1), ("b", 4), ("c", 6)]);
+    }
+
+    #[test]
+    fn element_line_of_a_message_with_a_leading_bom_and_declaration() {
+        let root = parse_message("\u{feff}<?xml version=\"1.0\"?>\n<a>\n<b/></a>").unwrap();
+        assert_eq!(root.line, 2);
+        assert_eq!(root.child("b").unwrap().line, 3);
+    }
+
+    #[test]
+    fn element_line_counting_is_linear_on_a_large_message() {
+        let n = 100_000u32;
+        let mut xml = String::from("<r>\n");
+        for _ in 0..n {
+            xml.push_str("<e/>\n");
+        }
+        xml.push_str("</r>");
+        let t = std::time::Instant::now();
+        let root = parse_message(&xml).unwrap();
+        let took = t.elapsed();
+        let last = root.elements().last().unwrap();
+        assert_eq!(last.line, n + 1);
+        assert!(
+            took < std::time::Duration::from_secs(5),
+            "parsing {n} lines took {took:?}: line counting is not linear"
+        );
+    }
 
     #[test]
     fn resolves_namespaces_and_attributes() {
