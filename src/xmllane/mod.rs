@@ -647,11 +647,15 @@ fn forbidden_backend_header(name: &str) -> bool {
         "host"
             | "transfer-encoding"
             | "connection"
+            | "keep-alive"
             | "te"
+            | "trailer"
+            | "expect"
             | "upgrade"
             | "traceparent"
             | "forwarded"
     ) || name.starts_with("content-")
+        || name.starts_with("proxy-")
         || name.starts_with("x-xtr-")
         || name.starts_with("x-forwarded-")
 }

@@ -422,8 +422,9 @@ variable. XTR reads the variable at boot.
   must not be able to send another secret (for example a keystore
   password) to its backend.
 * These header names are not allowed: `host`, `transfer-encoding`,
-  `connection`, `te`, `upgrade`, `traceparent`, `forwarded`, `content-*`,
-  `x-xtr-*` and `x-forwarded-*`. A name must be a valid HTTP header name.
+  `connection`, `keep-alive`, `te`, `trailer`, `expect`, `upgrade`,
+  `traceparent`, `forwarded`, `content-*`, `proxy-*`, `x-xtr-*` and
+  `x-forwarded-*`. A name must be a valid HTTP header name.
   The same name twice (not case-sensitive) is an error.
 * A variable that is not set, or is empty, stops the boot.
 * The header goes only to `inbound.backend`: to the URL of a message
