@@ -10,6 +10,7 @@
 
 mod builder;
 mod model;
+mod upa;
 
 pub use model::{
     build, AttributeDecl, Builtin, ComplexType, ElementDecl, Model, Occurs, Particle, Problem,
