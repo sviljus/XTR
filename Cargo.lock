@@ -1953,6 +1953,7 @@ version = "0.5.1-rc"
 dependencies = [
  "anyhow",
  "axum",
+ "base64",
  "handlebars",
  "libc",
  "native-tls",
