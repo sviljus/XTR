@@ -10,8 +10,9 @@ mkdir -p "$cache"
 jar="$cache/xercesImpl-$XERCES_VERSION.jar"
 
 sha256() {
-  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1
-  else shasum -a 256 "$1" | cut -d' ' -f1; fi
+  f=$1
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$f" | cut -d' ' -f1
+  else shasum -a 256 "$f" | cut -d' ' -f1; fi
 }
 
 if [ ! -f "$jar" ]; then
