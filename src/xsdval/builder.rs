@@ -53,36 +53,52 @@ struct Reader<'l> {
 }
 
 impl Reader<'_> {
-    fn problem(&mut self, file: &str, construct: impl Into<String>) {
+    fn problem(&mut self, file: &str, line: u32, construct: impl Into<String>) {
         let p = Problem {
             file: file.to_string(),
             component: String::new(),
             construct: construct.into(),
-            line: 0,
+            line,
         };
         if !self.problems.contains(&p) {
             self.problems.push(p);
         }
     }
 
-    fn add_doc(&mut self, file: String, xml: &str, inherited_tns: Option<String>, depth: usize) {
+    /// `from` is the including file and the line of its `xs:include`.
+    fn add_doc(
+        &mut self,
+        file: String,
+        xml: &str,
+        inherited_tns: Option<String>,
+        depth: usize,
+        from: Option<(&str, u32)>,
+    ) {
         if !self.visited.insert(file.clone()) {
             return;
         }
         let root = match dom::parse(xml) {
             Ok(r) if r.local == "schema" && is_xs(&r) => r,
-            Ok(_) => return self.problem(&file, "document is not an xs:schema"),
-            Err(_) => return self.problem(&file, "document is not well-formed XML"),
+            Ok(_) => return self.problem(&file, 0, "document is not an xs:schema"),
+            Err(_) => return self.problem(&file, 0, "document is not well-formed XML"),
         };
-        let tns = root
-            .attr("targetNamespace")
-            .map(String::from)
-            .or(inherited_tns);
+        let own_tns = root.attr("targetNamespace").map(String::from);
+        if let Some((inc_file, inc_line)) = from {
+            if own_tns != inherited_tns {
+                let what = if own_tns.is_none() {
+                    "chameleon include (the included schema has no targetNamespace)"
+                } else {
+                    "include with a different targetNamespace"
+                };
+                self.problem(inc_file, inc_line, what);
+            }
+        }
+        let tns = own_tns.or(inherited_tns);
         let qualified = root.attr("elementFormDefault") == Some("qualified");
         if root.attr("attributeFormDefault") == Some("qualified") {
-            self.problem(&file, "attributeFormDefault=qualified");
+            self.problem(&file, root.line, "attributeFormDefault=qualified");
         }
-        let mut includes: Vec<String> = Vec::new();
+        let mut includes: Vec<(String, u32)> = Vec::new();
         let d = self.idx.docs.len();
         for (i, c) in root.elements().enumerate() {
             if !is_xs(c) {
@@ -90,11 +106,11 @@ impl Reader<'_> {
             }
             match c.local.as_str() {
                 "include" => match c.attr("schemaLocation") {
-                    Some(l) => includes.push(l.to_string()),
-                    None => self.problem(&file, "xs:include without schemaLocation"),
+                    Some(l) => includes.push((l.to_string(), c.line)),
+                    None => self.problem(&file, c.line, "xs:include without schemaLocation"),
                 },
                 "import" | "redefine" | "override" => {
-                    self.problem(&file, format!("xs:{}", c.local));
+                    self.problem(&file, c.line, format!("xs:{}", c.local));
                 }
                 kind @ ("element" | "complexType" | "simpleType" | "attributeGroup") => {
                     let Some(name) = c.attr("name") else { continue };
@@ -108,7 +124,19 @@ impl Reader<'_> {
                         "simpleType" => &mut self.idx.simple,
                         _ => &mut self.idx.attr_groups,
                     };
-                    map.entry(q).or_insert((d, i));
+                    match map.entry(q) {
+                        std::collections::hash_map::Entry::Occupied(_) => {
+                            self.problems.push(Problem {
+                                file: file.clone(),
+                                component: name.to_string(),
+                                construct: format!("duplicate definition of {name}"),
+                                line: c.line,
+                            });
+                        }
+                        std::collections::hash_map::Entry::Vacant(v) => {
+                            v.insert((d, i));
+                        }
+                    }
                 }
                 _ => {}
             }
@@ -119,14 +147,16 @@ impl Reader<'_> {
             tns: tns.clone(),
             qualified,
         });
-        for loc in includes {
+        for (loc, line) in includes {
             if depth >= MAX_INCLUDE_DEPTH {
-                self.problem(&file, "xs:include nested too deep");
+                self.problem(&file, line, "xs:include nested too deep");
                 continue;
             }
             match (self.loader)(&loc) {
-                Some((f, _path, text)) => self.add_doc(f, &text, tns.clone(), depth + 1),
-                None => self.problem(&file, "xs:include: schema file not found"),
+                Some((f, _path, text)) => {
+                    self.add_doc(f, &text, tns.clone(), depth + 1, Some((&file, line)))
+                }
+                None => self.problem(&file, line, "xs:include: schema file not found"),
             }
         }
     }
@@ -136,6 +166,7 @@ struct Build<'a> {
     idx: &'a Index,
     problems: Vec<Problem>,
     cur: (String, String),
+    line: u32,
     elem_cache: HashMap<QName, Arc<ElementDecl>>,
     complex_cache: HashMap<QName, Arc<ComplexType>>,
     simple_cache: HashMap<QName, Arc<SimpleType>>,
@@ -155,13 +186,14 @@ pub(super) fn run(
         problems: Vec::new(),
     };
     for (file, xml) in entries {
-        rd.add_doc(file.clone(), xml, None, 0);
+        rd.add_doc(file.clone(), xml, None, 0, None);
     }
     let Reader { idx, problems, .. } = rd;
     let mut b = Build {
         idx: &idx,
         problems,
         cur: (String::new(), String::new()),
+        line: 0,
         elem_cache: HashMap::new(),
         complex_cache: HashMap::new(),
         simple_cache: HashMap::new(),
@@ -192,11 +224,16 @@ pub(super) fn run(
 
 impl<'a> Build<'a> {
     fn problem(&mut self, construct: impl Into<String>) {
+        let line = self.line;
+        self.problem_at(line, construct);
+    }
+
+    fn problem_at(&mut self, line: u32, construct: impl Into<String>) {
         let p = Problem {
             file: self.cur.0.clone(),
             component: self.cur.1.clone(),
             construct: construct.into(),
-            line: 0,
+            line,
         };
         if !self.problems.contains(&p) {
             self.problems.push(p);
@@ -233,6 +270,7 @@ impl<'a> Build<'a> {
     /// Checks the attributes of an XSD element. `allowed` are accepted;
     /// `false_ok` are accepted only with the value `false`.
     fn check_attrs(&mut self, el: &Element, allowed: &[&str], false_ok: &[&str]) {
+        self.line = el.line;
         for a in &el.attrs {
             if a.ns.is_some() || a.local == "id" || allowed.contains(&a.local.as_str()) {
                 continue;
@@ -245,6 +283,7 @@ impl<'a> Build<'a> {
     }
 
     fn occurs(&mut self, el: &Element) -> Occurs {
+        self.line = el.line;
         let min = match el.attr("minOccurs") {
             None => 1,
             Some(v) => v.parse::<u32>().unwrap_or_else(|_| {
@@ -260,6 +299,9 @@ impl<'a> Build<'a> {
                 1
             })),
         };
+        if max == Some(0) {
+            self.problem("maxOccurs=0");
+        }
         if max.is_some_and(|m| m < min) {
             self.problem("maxOccurs below minOccurs");
         }
@@ -340,10 +382,11 @@ impl<'a> Build<'a> {
                 "simpleType" if el.attr("type").is_none() => {
                     ty = self.simple_def(d, c).map(TypeDef::Simple);
                 }
-                other => self.problem(format!("xs:{other}")),
+                other => self.problem_at(c.line, format!("xs:{other}")),
             }
         }
         if ty.is_none() && el.attr("type").is_none() {
+            self.line = el.line;
             self.problem("element without a type");
         }
         Some(Arc::new(ElementDecl {
@@ -386,6 +429,7 @@ impl<'a> Build<'a> {
     }
 
     fn complex_def(&mut self, d: usize, el: &'a Element) -> Arc<ComplexType> {
+        self.line = el.line;
         self.check_attrs(el, &["name", "block", "final"], &["mixed", "abstract"]);
         let mut ct = ComplexType::default();
         for c in el.elements().filter(|c| is_xs(c)) {
@@ -407,7 +451,7 @@ impl<'a> Build<'a> {
                     ct.attributes.extend(g);
                 }
                 "complexContent" => self.complex_content(d, c, &mut ct),
-                other => self.problem(format!("xs:{other}")),
+                other => self.problem_at(c.line, format!("xs:{other}")),
             }
         }
         if ct
@@ -421,18 +465,20 @@ impl<'a> Build<'a> {
     }
 
     fn complex_content(&mut self, d: usize, el: &'a Element, ct: &mut ComplexType) {
+        self.line = el.line;
         self.check_attrs(el, &[], &["mixed"]);
         for c in el.elements().filter(|c| is_xs(c)) {
             match c.local.as_str() {
                 "annotation" => {}
                 "extension" => self.extension(d, c, ct),
                 "restriction" => self.problem("xs:restriction in complexContent"),
-                other => self.problem(format!("xs:{other}")),
+                other => self.problem_at(c.line, format!("xs:{other}")),
             }
         }
     }
 
     fn extension(&mut self, d: usize, el: &'a Element, ct: &mut ComplexType) {
+        self.line = el.line;
         self.check_attrs(el, &["base"], &[]);
         let mut base: Option<Arc<ComplexType>> = None;
         match el.attr("base") {
@@ -470,7 +516,7 @@ impl<'a> Build<'a> {
                     let g = self.group_ref(c);
                     attrs.extend(g);
                 }
-                other => self.problem(format!("xs:{other}")),
+                other => self.problem_at(c.line, format!("xs:{other}")),
             }
         }
         let (base_content, mut all_attrs) = match &base {
@@ -489,6 +535,7 @@ impl<'a> Build<'a> {
     }
 
     fn model_group(&mut self, d: usize, el: &'a Element) -> Option<Particle> {
+        self.line = el.line;
         self.check_attrs(el, &["minOccurs", "maxOccurs"], &[]);
         let occurs = self.occurs(el);
         let mut items = Vec::new();
@@ -502,7 +549,7 @@ impl<'a> Build<'a> {
                     }
                 }
                 "sequence" | "choice" => items.extend(self.model_group(d, c)),
-                other => self.problem(format!("xs:{other}")),
+                other => self.problem_at(c.line, format!("xs:{other}")),
             }
         }
         Some(if el.local == "choice" {
@@ -515,6 +562,7 @@ impl<'a> Build<'a> {
     // ---- attributes ----
 
     fn attribute(&mut self, d: usize, el: &'a Element) -> Option<AttributeDecl> {
+        self.line = el.line;
         self.check_attrs(el, &["name", "type", "use", "fixed"], &[]);
         let Some(name) = el.attr("name") else {
             self.problem("attribute without name");
@@ -536,7 +584,7 @@ impl<'a> Build<'a> {
             match c.local.as_str() {
                 "annotation" => {}
                 "simpleType" if el.attr("type").is_none() => ty = self.simple_def(d, c),
-                other => self.problem(format!("xs:{other}")),
+                other => self.problem_at(c.line, format!("xs:{other}")),
             }
         }
         if ty.is_none() && el.attr("type").is_none() {
@@ -577,7 +625,7 @@ impl<'a> Build<'a> {
                 "annotation" => {}
                 "attribute" => out.extend(self.attribute(loc.0, c)),
                 "attributeGroup" => out.extend(self.group_ref(c)),
-                other => self.problem(format!("xs:{other}")),
+                other => self.problem_at(c.line, format!("xs:{other}")),
             }
         }
         self.leave(prev);
@@ -640,13 +688,14 @@ impl<'a> Build<'a> {
     }
 
     fn simple_def(&mut self, d: usize, el: &'a Element) -> Option<Arc<SimpleType>> {
+        self.line = el.line;
         self.check_attrs(el, &["name", "final"], &[]);
         let mut out = None;
         for c in el.elements().filter(|c| is_xs(c)) {
             match c.local.as_str() {
                 "annotation" => {}
                 "restriction" => out = self.restriction(d, c),
-                other => self.problem(format!("xs:{other}")),
+                other => self.problem_at(c.line, format!("xs:{other}")),
             }
         }
         if out.is_none() {
@@ -656,6 +705,7 @@ impl<'a> Build<'a> {
     }
 
     fn restriction(&mut self, d: usize, el: &'a Element) -> Option<Arc<SimpleType>> {
+        self.line = el.line;
         self.check_attrs(el, &["base"], &[]);
         let mut base: Option<Arc<SimpleType>> = None;
         match el.attr("base") {
@@ -700,7 +750,7 @@ impl<'a> Build<'a> {
                     Err(_) => self.problem(format!("xs:{} value", c.local)),
                 },
                 "minInclusive" => step.min_inclusive = Some(v.to_string()),
-                other => self.problem(format!("xs:{other}")),
+                other => self.problem_at(c.line, format!("xs:{other}")),
             }
         }
         derived.steps.push(step);
