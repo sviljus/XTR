@@ -271,7 +271,8 @@ An existing lane validates from this version on, because a missing key means
 `enforce`. Until a differential test against a second XSD processor shows no
 differences for your schemas, set `validate: report` in the sidecar of a
 production lane. Then the choice is written down and visible. Move to `enforce`
-when the logs show no unexpected violations.
+when the differential test shows no differences for your schemas and the logs
+show no unexpected violations.
 
 **Inbound.** XTR validates the message before it calls the backend and
 before `forward`. A message that breaks the XSD gets HTTP 422
