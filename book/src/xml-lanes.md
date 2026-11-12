@@ -47,6 +47,8 @@ declaration. XTR refuses a message with HTTP 400 in these cases:
   A processing instruction named `xml` (any case) is refused. Text outside
   the root element is refused, except white space: `malformed_xml`.
 
+The declaration follows XML 1.0 §2.8: `version`, then an optional
+`encoding`, then an optional `standalone`, each once, in lower case.
 One leading BOM is allowed. A declaration without `encoding`, or no
 declaration, is accepted.
 
