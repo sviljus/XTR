@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   mount). Symlinks to files and directories still work. (#43)
 
 ### Added
+- Raw-XML lanes: `validate.inbound: annotate`. XTR always calls the backend and adds `schemaValid` and `violations`. Input that XTR cannot read as a message (not UTF-8, bad prolog, DOCTYPE, unknown root) goes to `<backend>/_invalid`. Invalid input is sent as `rawBase64` only. `xtr doctor` reports an `annotate` lane as INFO.
 - XSD validation of raw-XML lanes, in Rust, for inbound messages and outbound requests. The sidecar
   key `validate:` sets `off`, `report` or `enforce` per direction. A missing key means `enforce`:
   a message that breaks the XSD gets HTTP 422 `schema_invalid` (the answer lists the element path,

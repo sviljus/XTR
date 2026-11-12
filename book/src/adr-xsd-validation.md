@@ -66,17 +66,37 @@ Reasons:
 
    A missing key means `enforce`. `report` logs the errors and does not
    refuse the message. `xtr doctor` reports `off` and `report` as
-   WEAK.
+   WEAK. A fourth mode, `annotate`, applies to inbound only (point 5a).
 5. Answers: an invalid message gets HTTP 422 `schema_invalid`. An invalid
    outbound request does not go to the peer. An internal validator error gets
    HTTP 500 `validator_failed`; the details go to the log only.
    HTTP 422 is an HTTP-level answer. Use `enforce` on inbound only where the
    protocol of the peer accepts a 4xx answer. A protocol that needs an
    application-level error message for an invalid message (for example the
-   ERRU `ErrorNotification` with the status `InvalidFormat`) keeps
-   `inbound: report`. A later mode can pass the violations to the backend, so
-   that the backend sends the error message. That mode is not part of this
-   decision.
+   ERRU `ErrorNotification` with the status `InvalidFormat`) uses
+   `inbound: annotate` (see point 5a). `report` is the step before it.
+5a. Mode `annotate` (inbound only): XTR always calls the backend and adds
+   `schemaValid` and `violations` to the JSON. The backend owns the answer
+   to the peer and the protocol, for example the ERRU `ErrorNotification`.
+   XTR stays neutral to the protocol. What goes where:
+
+   | Input | XTR does |
+   |-------|----------|
+   | Valid message | `POST <backend>/<Message>`, `schemaValid: true` |
+   | Message that breaks the XSD | `POST <backend>/<Message>`, `schemaValid: false`, violations, `rawBase64`, no `request`, no `rawXml` |
+   | Not UTF-8, bad prolog or declaration, DOCTYPE, unknown root | `POST <backend>/_invalid`, `schemaValid: false`, one code, `rawBase64` |
+   | Body over the limit, `XTR_OFFLINE` | HTTP 413, HTTP 503 |
+   | Validator failure | HTTP 500 `validator_failed` |
+
+   Rules: `annotate` cannot be used for `outbound`. A message with `forward`
+   cannot use `annotate`. `inbound.backend` is required, and no message is
+   named `_invalid`. Invalid input is only sent as `rawBase64`, because it
+   comes from an unauthenticated sender and can be invalid UTF-8; the
+   backend must not parse it with an entity-resolving parser. `xtr doctor`
+   reports the lane as INFO, not WEAK, because the backend owns the decision.
+   With `annotate`, every request body that reaches the lane goes to the
+   backend. In production, the inbound port is restricted to the peer
+   (ingress mTLS or a network rule).
 6. An error names the element path, a rule code and the schema file and line.
    It never contains the value from the message. The file name is relative
    to the schema directory. An answer has at most 10 errors.
