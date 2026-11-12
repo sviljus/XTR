@@ -56,3 +56,22 @@ of this oracle and `XTR_ORACLE_CACHE` to the jar directory.
 * `expected-differences`: the closed list of allowed differences.
   A difference is allowed only when XTR refuses and Xerces accepts.
 * `selftest/`: synthetic schema and messages.
+
+## Owner-approved differences
+
+`owner-approved-accept` lists differences that the owner of the system approved on purpose. The
+list is closed and the report counts its hits apart from `expected-differences`.
+
+* `utf8_label`: XTR accepts `encoding="utf8"` as an alias of UTF-8. Xerces refuses it.
+  For each hit, the oracle replaces the label with `UTF-8` and runs Xerces again. The verdict and
+  the rule class must then agree in full. Other labels (`utf_8`, `utf-8 `, `utf8x`, `UTF-16`) are
+  not covered. The self-test has a negative message for each of them, and for `utf8` with an
+  invalid UTF-8 byte.
+* `latin1` is a label that the JDK knows. Xerces accepts it and XTR refuses it. This is the
+  allowed direction (`non_utf8_declaration`).
+
+## Rule class mapping
+
+`cvc-minInclusive-valid` maps to `min_inclusive` and to `type_invalid`. For a restriction of
+`positiveInteger` with `minInclusive`, a value below the base range (`0`, `-1`) gets
+`type_invalid` from XTR and `cvc-minInclusive-valid` from Xerces. The verdict is the same.
