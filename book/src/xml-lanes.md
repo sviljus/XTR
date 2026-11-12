@@ -181,6 +181,10 @@ a new backend. List every message type. Give each message type that the
 old system still serves a `forward`. Give the other message types a
 backend. `forward` and `backend` are mutually exclusive per message.
 
+When inbound validation is `enforce`, XTR checks the message before it
+forwards it. An invalid message no longer reaches the old system. See
+"XSD validation".
+
 **Which answers XTR relays.**
 
 * A 2xx answer is relayed.
