@@ -1,6 +1,8 @@
 //! Validation model: built once at boot from the lane's XSD documents.
 
-use crate::inbound::contract::SchemaLoader;
+use crate::inbound::contract::{QName, SchemaLoader};
+use std::collections::BTreeMap;
+use std::sync::Arc;
 
 /// One reason why the model cannot be built.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -15,21 +17,111 @@ pub struct Problem {
 
 /// Validation model of the messages of one lane.
 #[derive(Debug)]
-pub struct Model {}
+pub struct Model {
+    /// Message roots by local name.
+    pub roots: BTreeMap<String, Arc<ElementDecl>>,
+}
 
 /// Builds the model for the message roots `roots` (global element
 /// names) from the entry schemas `entries` (`file name`, `content`).
 /// `loader` resolves `xs:include` targets.
 pub fn build(
-    _entries: &[(String, String)],
-    _loader: &SchemaLoader,
-    _roots: &[&str],
+    entries: &[(String, String)],
+    loader: &SchemaLoader,
+    roots: &[&str],
 ) -> Result<Model, Vec<Problem>> {
-    Err(vec![Problem {
-        file: String::new(),
-        component: String::new(),
-        construct: "not implemented".into(),
-    }])
+    super::builder::run(entries, loader, roots)
+}
+
+/// Element declaration.
+#[derive(Debug)]
+pub struct ElementDecl {
+    pub name: QName,
+    pub ty: TypeDef,
+}
+
+#[derive(Debug, Clone)]
+pub enum TypeDef {
+    Simple(Arc<SimpleType>),
+    Complex(Arc<ComplexType>),
+}
+
+/// How often a particle may occur. `max == None` means unbounded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Occurs {
+    pub min: u32,
+    pub max: Option<u32>,
+}
+
+#[derive(Debug, Clone)]
+pub enum Particle {
+    Element {
+        decl: Arc<ElementDecl>,
+        occurs: Occurs,
+    },
+    Sequence {
+        items: Vec<Particle>,
+        occurs: Occurs,
+    },
+    Choice {
+        items: Vec<Particle>,
+        occurs: Occurs,
+    },
+}
+
+/// Complex type with the base type already merged in: `content` holds
+/// the base content first, then the own content.
+#[derive(Debug, Default)]
+pub struct ComplexType {
+    pub content: Option<Particle>,
+    pub attributes: Vec<AttributeDecl>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AttributeDecl {
+    /// Attributes are in no namespace.
+    pub name: String,
+    pub ty: Arc<SimpleType>,
+    pub required: bool,
+    pub fixed: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Builtin {
+    String,
+    Token,
+    Boolean,
+    NonNegativeInteger,
+    PositiveInteger,
+    Date,
+    DateTime,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WhiteSpace {
+    Preserve,
+    Replace,
+    Collapse,
+}
+
+/// Facets of one derivation step. A value must satisfy the facets of
+/// every step (AND). Inside a step, `enumeration` values and `pattern`s
+/// combine with OR.
+#[derive(Debug, Clone, Default)]
+pub struct Step {
+    pub enumeration: Option<Vec<String>>,
+    pub patterns: Vec<String>,
+    pub length: Option<usize>,
+    pub min_length: Option<usize>,
+    pub max_length: Option<usize>,
+    pub min_inclusive: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SimpleType {
+    pub base: Builtin,
+    pub whitespace: WhiteSpace,
+    pub steps: Vec<Step>,
 }
 
 #[cfg(test)]

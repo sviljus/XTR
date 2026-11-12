@@ -8,6 +8,10 @@
 //! outside the subset that a message root reaches (also through type
 //! inheritance, attribute groups or includes) stops the boot.
 
+mod builder;
 mod model;
 
-pub use model::{build, Model, Problem};
+pub use model::{
+    build, AttributeDecl, Builtin, ComplexType, ElementDecl, Model, Occurs, Particle, Problem,
+    SimpleType, Step, TypeDef, WhiteSpace,
+};
