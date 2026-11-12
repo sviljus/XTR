@@ -1031,4 +1031,44 @@ mod tests {
         let v = check(&m, &doc("\n\n<v>B</v>"));
         assert_eq!(v[0].line, 3);
     }
+
+    #[test]
+    fn a_year_has_at_most_nine_digits() {
+        let m =
+            typed(r#"<xs:simpleType name="V"><xs:restriction base="xs:date"/></xs:simpleType>"#);
+        assert!(value_codes(&m, "123456789-01-01").is_empty());
+        assert_eq!(value_codes(&m, "1234567890-01-01"), ["type_invalid"]);
+        assert_eq!(
+            value_codes(&m, "9999999999999999999-01-01"),
+            ["type_invalid"]
+        );
+        let m = typed(
+            r#"<xs:simpleType name="V"><xs:restriction base="xs:dateTime">
+                 <xs:minInclusive value="1753-01-01T00:00:00Z"/></xs:restriction></xs:simpleType>"#,
+        );
+        assert_eq!(
+            value_codes(&m, "9999999999999999999-01-01T00:00:00Z"),
+            ["type_invalid"]
+        );
+    }
+
+    #[test]
+    fn element_missing_reports_the_line_of_the_parent_element() {
+        let m = model(SIMPLE);
+        let v = check(&m, &doc("\n\n"));
+        assert_eq!(v[0].code, "element_missing");
+        assert_eq!(v[0].line, 1, "the parent starts on line 1");
+        let n = model(
+            r#"<xs:element name="Msg"><xs:complexType><xs:sequence>
+                 <xs:element name="in"><xs:complexType><xs:sequence>
+                   <xs:element name="a" type="xs:string"/>
+                 </xs:sequence></xs:complexType></xs:element>
+               </xs:sequence></xs:complexType></xs:element>"#,
+        );
+        let v = check(&n, &doc("\n<in>\n</in>"));
+        assert_eq!(
+            (v[0].code, v[0].path.as_str(), v[0].line),
+            ("element_missing", "/Msg/in", 2)
+        );
+    }
 }
