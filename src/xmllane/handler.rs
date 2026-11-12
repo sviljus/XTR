@@ -318,7 +318,7 @@ async fn handle_inbound(
                 &root.local,
                 "inbound",
                 &v,
-                &svc.log_limit,
+                &svc.log_limit_inbound,
             ) {
                 return resp;
             }
@@ -494,7 +494,7 @@ async fn call_outbound(
             tracing::error!(
                 group,
                 name,
-                message,
+                msg_type = message,
                 "XSD validator failed on an outbound request"
             );
             return Ok(err(
@@ -511,7 +511,7 @@ async fn call_outbound(
                 message,
                 "outbound",
                 &v,
-                &svc.log_limit,
+                &svc.log_limit_outbound,
             ) {
                 return Ok(resp);
             }
