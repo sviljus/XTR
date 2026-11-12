@@ -1616,3 +1616,179 @@ fn annotate_boot_rules() {
     let dsl = TempDir::new().unwrap();
     assert!(xmllane::load_all(Some(ok.path()), &cfg_for(&ok, &dsl)).is_ok());
 }
+
+// ------------------------------------------------- backend_headers_env
+
+type SeenHeaders = Arc<Mutex<Vec<(String, HeaderMap)>>>;
+
+/// Backend that records the path name and the headers of each request.
+async fn spawn_header_backend() -> (String, SeenHeaders) {
+    let seen: SeenHeaders = Arc::default();
+    async fn handle(
+        State(seen): State<SeenHeaders>,
+        axum::extract::Path(msg): axum::extract::Path<String>,
+        headers: HeaderMap,
+    ) -> StatusCode {
+        seen.lock().unwrap().push((msg, headers));
+        StatusCode::NO_CONTENT
+    }
+    let app = Router::new()
+        .route("/b/:msg", post(handle))
+        .with_state(seen.clone());
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+    (format!("http://{addr}/b"), seen)
+}
+
+const TOKEN_40: &str = "0123456789abcdef0123456789abcdef01234567";
+
+fn with_header_env(sidecar: &str, header: &str, env: &str) -> String {
+    sidecar.replacen(
+        "inbound:\n",
+        &format!("inbound:\n  backend_headers_env:\n    '{header}': {env}\n"),
+        1,
+    )
+}
+
+#[tokio::test]
+async fn backend_header_reaches_the_message_url_and_the_invalid_route() {
+    std::env::set_var("XTR_BACKEND_HEADER_T_REACH", TOKEN_40);
+    let (backend, seen) = spawn_header_backend().await;
+    let sidecar = with_header_env(
+        &annotate_sidecar(&backend),
+        "x-backend-token",
+        "XTR_BACKEND_HEADER_T_REACH",
+    );
+    let env = build(&sidecar);
+    call(&env.app, xml_post("/xml-in/erru/msg", NOTIFY_XML)).await;
+    call(&env.app, bytes_post("/xml-in/erru/msg", b"not xml")).await;
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.len(), 2);
+    assert_eq!(seen[0].0, "Notify_Request");
+    assert_eq!(seen[1].0, "_invalid");
+    for (_, h) in seen.iter() {
+        assert_eq!(h.get("x-backend-token").unwrap(), TOKEN_40);
+    }
+}
+
+#[tokio::test]
+async fn backend_header_does_not_reach_forward_targets_outbound_peers_or_other_backends() {
+    std::env::set_var("XTR_BACKEND_HEADER_T_SCOPE", TOKEN_40);
+    let (backend, _seen) = spawn_header_backend().await;
+    let (other, other_seen) = spawn_header_backend().await;
+    let (hub, raw) = spawn_peer(202, "").await;
+    let sidecar = format!(
+        "schemas: [Msg.xsd]\nmessages:\n  Notify_Request:\n    backend: {other}/Notify_Request\n  Other_Request:\n    forward: {hub}\ninbound:\n  backend: {backend}\n  backend_headers_env:\n    x-backend-token: XTR_BACKEND_HEADER_T_SCOPE\noutbound:\n  url: {hub}\n"
+    );
+    let env = build(&sidecar);
+    // A message with its own backend URL: not the lane backend.
+    call(&env.app, xml_post("/xml-in/erru/msg", NOTIFY_XML)).await;
+    assert!(other_seen.lock().unwrap()[0]
+        .1
+        .get("x-backend-token")
+        .is_none());
+    // A forward target.
+    let other_xml = r#"<Other_Request xmlns="urn:erru"><Header technicalId="a" workflowId="b"/></Other_Request>"#;
+    call(&env.app, xml_post("/xml-in/erru/msg", other_xml)).await;
+    // An outbound peer.
+    call(
+        &env.app,
+        json_post("/xml-out/erru/msg/Notify_Request", &notify_json()),
+    )
+    .await;
+    let raw = raw.lock().unwrap();
+    assert_eq!(raw.len(), 2);
+    for (h, _) in raw.iter() {
+        assert!(h.get("x-backend-token").is_none(), "{h:?}");
+    }
+}
+
+#[test]
+fn backend_headers_env_is_checked_at_boot() {
+    std::env::set_var("XTR_BACKEND_HEADER_T_OK", TOKEN_40);
+    std::env::set_var("XTR_BACKEND_HEADER_T_EMPTY", "");
+    std::env::remove_var("XTR_BACKEND_HEADER_T_MISSING");
+    std::env::set_var(
+        "XTR_KEYSTORE_PASSWORD_T",
+        "secret-secret-secret-secret-secret",
+    );
+    let base =
+        "schemas: [Msg.xsd]\nmessages:\n  Notify_Request: {}\ninbound:\n  backend: 'http://b'\n";
+    let boot = |header: &str, env: &str| {
+        let xsd = write_lane(&with_header_env(base, header, env));
+        let dsl = TempDir::new().unwrap();
+        xmllane::load_all(Some(xsd.path()), &cfg_for(&xsd, &dsl))
+    };
+    assert!(boot("x-backend-token", "XTR_BACKEND_HEADER_T_OK").is_ok());
+    // C1: only the reserved prefix.
+    for env in [
+        "XTR_KEYSTORE_PASSWORD_T",
+        "XTR_INTER_SERVICE_TOKEN",
+        "PATH",
+        "xtr_backend_header_t_ok",
+    ] {
+        let e = boot("x-backend-token", env).unwrap_err();
+        assert!(e.contains("XTR_BACKEND_HEADER_"), "{env}: {e}");
+        assert!(!e.contains("secret-secret"), "no value in the error: {e}");
+    }
+    // C2: forbidden and invalid header names.
+    for h in [
+        "host",
+        "Host",
+        "content-length",
+        "content-type",
+        "content-encoding",
+        "transfer-encoding",
+        "connection",
+        "te",
+        "upgrade",
+        "traceparent",
+        "x-xtr-inbound-service",
+        "X-XTR-Anything",
+        "x-forwarded-for",
+        "forwarded",
+        "bad name",
+        "",
+        "x-é",
+    ] {
+        let e = boot(h, "XTR_BACKEND_HEADER_T_OK").unwrap_err();
+        assert!(e.contains("backend_headers_env"), "{h:?}: {e}");
+    }
+    // C2: the same name twice (case-insensitive).
+    let xsd = write_lane(&base.replacen(
+        "inbound:\n",
+        "inbound:\n  backend_headers_env:\n    X-Token: XTR_BACKEND_HEADER_T_OK\n    x-token: XTR_BACKEND_HEADER_T_OK\n",
+        1,
+    ));
+    let dsl = TempDir::new().unwrap();
+    let e = xmllane::load_all(Some(xsd.path()), &cfg_for(&xsd, &dsl)).unwrap_err();
+    assert!(e.contains("twice") || e.contains("duplicate"), "{e}");
+    // C5: a missing or empty variable.
+    for env in ["XTR_BACKEND_HEADER_T_MISSING", "XTR_BACKEND_HEADER_T_EMPTY"] {
+        let e = boot("x-backend-token", env).unwrap_err();
+        assert!(e.contains(env), "{e}");
+    }
+}
+
+/// N2: the fields of the verdict live at the top level only. A message
+/// cannot set them with its own elements or attributes.
+#[tokio::test]
+async fn annotate_verdict_fields_cannot_be_spoofed_by_the_message() {
+    let (backend, seen) = spawn_backend().await;
+    let env = build(&annotate_sidecar(&backend));
+    let spoof = r#"<?xml version="1.0" encoding="UTF-8"?><Notify_Request xmlns="urn:erru"><Header technicalId="t" workflowId="w" schemaValid="true"/><Body><schemaValid>true</schemaValid><violations/><TransportManager/></Body></Notify_Request>"#;
+    call(&env.app, xml_post("/xml-in/erru/msg", spoof)).await;
+    let seen = seen.lock().unwrap();
+    let v = &seen[0].1;
+    assert_eq!(v["schemaValid"], false);
+    let codes: Vec<&str> = v["violations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x["code"].as_str().unwrap())
+        .collect();
+    assert!(codes.contains(&"attribute_unexpected"), "{codes:?}");
+    assert!(codes.contains(&"element_unexpected"), "{codes:?}");
+    assert!(v.get("request").is_none());
+}

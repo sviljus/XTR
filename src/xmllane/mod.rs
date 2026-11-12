@@ -189,7 +189,25 @@ pub struct XmlInbound {
     /// reserved routes.
     #[serde(default)]
     pub path: Option<String>,
+    /// Extra headers for the calls to `inbound.backend` (a message URL
+    /// that comes from `inbound.backend`, and `_invalid`): header name →
+    /// name of an environment variable that holds the value. The variable
+    /// name must start with `XTR_BACKEND_HEADER_`. The value never goes
+    /// to a `forward` target, to a message with its own `backend` URL, or
+    /// to a peer.
+    #[serde(default)]
+    pub backend_headers_env: BTreeMap<String, String>,
 }
+
+/// Prefix that an environment variable of `backend_headers_env` must have.
+/// A sidecar can name the variable. The prefix stops a sidecar from sending
+/// another secret (a keystore password, the inter-service token) to its
+/// backend.
+pub const BACKEND_HEADER_ENV_PREFIX: &str = "XTR_BACKEND_HEADER_";
+
+/// Minimum length (bytes) of a backend header value that `xtr doctor`
+/// accepts without a warning.
+pub const BACKEND_HEADER_MIN_LEN: usize = 32;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -307,9 +325,22 @@ pub struct XmlService {
     /// violations of the own outbound requests.
     pub log_limit_inbound: LogLimit,
     pub log_limit_outbound: LogLimit,
+    /// Resolved `inbound.backend_headers_env`. The values are marked
+    /// sensitive: `Debug` does not print them.
+    pub backend_headers: Vec<(reqwest::header::HeaderName, reqwest::header::HeaderValue)>,
 }
 
 impl XmlService {
+    /// Whether the backend URL of a message comes from `inbound.backend`
+    /// (not from `messages.<M>.backend`). Only such a URL gets
+    /// `backend_headers`.
+    pub fn backend_is_lane(&self, message: &str) -> bool {
+        !self
+            .messages
+            .get(message)
+            .is_some_and(|m| m.cfg.backend.is_some())
+    }
+
     /// Validation mode of each served direction, for the boot log and
     /// for `xtr doctor`: `inbound=enforce outbound=report`.
     pub fn validate_summary(&self) -> String {
@@ -598,6 +629,108 @@ pub fn load_all(dir: Option<&Path>, cfg: &AppConfig) -> Result<XmlRegistry, Stri
     Ok(reg)
 }
 
+/// The resolved `inbound.backend_headers_env` of a sidecar.
+fn lane_backend_headers(
+    sc: &XmlSidecar,
+) -> Result<Vec<(reqwest::header::HeaderName, reqwest::header::HeaderValue)>, String> {
+    match &sc.inbound {
+        Some(ib) => resolve_backend_headers(&ib.backend_headers_env),
+        None => Ok(Vec::new()),
+    }
+}
+
+/// Header names that a sidecar must not set (`backend_headers_env`): XTR
+/// sets them, or they change how the message is framed or routed.
+fn forbidden_backend_header(name: &str) -> bool {
+    matches!(
+        name,
+        "host"
+            | "transfer-encoding"
+            | "connection"
+            | "te"
+            | "upgrade"
+            | "traceparent"
+            | "forwarded"
+    ) || name.starts_with("content-")
+        || name.starts_with("x-xtr-")
+        || name.starts_with("x-forwarded-")
+}
+
+/// Resolves `inbound.backend_headers_env`. Any fault refuses boot. The
+/// messages never hold a value.
+fn resolve_backend_headers(
+    map: &BTreeMap<String, String>,
+) -> Result<Vec<(reqwest::header::HeaderName, reqwest::header::HeaderValue)>, String> {
+    let mut out: Vec<(reqwest::header::HeaderName, reqwest::header::HeaderValue)> = Vec::new();
+    for (header, env) in map {
+        let name = reqwest::header::HeaderName::from_bytes(header.as_bytes()).map_err(|_| {
+            format!("inbound.backend_headers_env: {header:?} is not a valid HTTP header name")
+        })?;
+        if forbidden_backend_header(name.as_str()) {
+            return Err(format!(
+                "inbound.backend_headers_env: the header name {header:?} is not allowed"
+            ));
+        }
+        if out.iter().any(|(n, _)| *n == name) {
+            return Err(format!(
+                "inbound.backend_headers_env: the header name {header:?} is set twice (names are not case-sensitive)"
+            ));
+        }
+        if !env.starts_with(BACKEND_HEADER_ENV_PREFIX) {
+            return Err(format!(
+                "inbound.backend_headers_env: the variable {env:?} must start with {BACKEND_HEADER_ENV_PREFIX}"
+            ));
+        }
+        let value = std::env::var(env)
+            .ok()
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| {
+                format!("inbound.backend_headers_env: the variable {env} is not set or is empty")
+            })?;
+        let mut hv = reqwest::header::HeaderValue::from_str(&value).map_err(|_| {
+            format!("inbound.backend_headers_env: the value of {env} is not a valid header value")
+        })?;
+        hv.set_sensitive(true);
+        out.push((name, hv));
+    }
+    Ok(out)
+}
+
+/// Lanes that name a `backend_headers_env` variable whose value is shorter
+/// than [`BACKEND_HEADER_MIN_LEN`], as `group/name VARIABLE` — for `xtr
+/// doctor`. The value is never returned.
+pub fn short_backend_headers(dir: Option<&Path>) -> Vec<String> {
+    let mut out = Vec::new();
+    let Some(root) = dir.filter(|d| d.is_dir()) else {
+        return out;
+    };
+    let Ok(files) = sidecar_files(root) else {
+        return out;
+    };
+    for sc in files {
+        let Ok(text) = fs::read_to_string(&sc) else {
+            continue;
+        };
+        let Ok(x) = serde_yaml_ng::from_str::<XmlSidecar>(&text) else {
+            continue;
+        };
+        let Ok((group, name)) = lane_id(root, &sc) else {
+            continue;
+        };
+        for env in x
+            .inbound
+            .iter()
+            .flat_map(|i| i.backend_headers_env.values())
+        {
+            if std::env::var(env).is_ok_and(|v| v.len() < BACKEND_HEADER_MIN_LEN) {
+                out.push(format!("{group}/{name} {env}"));
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
 fn http_url(what: &str, url: &str) -> Result<(), String> {
     let u = url::Url::parse(url).map_err(|e| format!("{what} {url:?}: {e}"))?;
     if !matches!(u.scheme(), "http" | "https") {
@@ -621,6 +754,7 @@ fn prepare(root: &Path, sidecar: &Path, cfg: &AppConfig) -> Result<XmlService, S
     check_inbound(&sc, &messages)?;
     let http = build_outbound(&sc, &messages, cfg)?;
     let model = build_model(&sc, &entries, &loader)?;
+    let backend_headers = lane_backend_headers(&sc)?;
 
     Ok(XmlService {
         group,
@@ -632,6 +766,7 @@ fn prepare(root: &Path, sidecar: &Path, cfg: &AppConfig) -> Result<XmlService, S
         model,
         log_limit_inbound: LogLimit::default(),
         log_limit_outbound: LogLimit::default(),
+        backend_headers,
     })
 }
 
@@ -1051,7 +1186,20 @@ mod validate_tests {
             model: None,
             log_limit_inbound: LogLimit::default(),
             log_limit_outbound: LogLimit::default(),
+            backend_headers: Vec::new(),
         }
+    }
+
+    #[test]
+    fn a_backend_header_value_stays_out_of_debug_output() {
+        std::env::set_var(
+            "XTR_BACKEND_HEADER_UNIT",
+            "unit-secret-value-0123456789abcdef0123",
+        );
+        let map = BTreeMap::from([("x-token".to_string(), "XTR_BACKEND_HEADER_UNIT".to_string())]);
+        let resolved = resolve_backend_headers(&map).unwrap();
+        assert!(!format!("{resolved:?}").contains("unit-secret"));
+        assert!(!format!("{map:?}").contains("unit-secret"));
     }
 
     #[test]
@@ -1075,6 +1223,7 @@ mod validate_tests {
             model: None,
             log_limit_inbound: LogLimit::default(),
             log_limit_outbound: LogLimit::default(),
+            backend_headers: Vec::new(),
         };
         let both = svc(sc(
             "schemas: [a.xsd]\nmessages: {M: {}}\ninbound: {backend: 'http://b'}\noutbound: {url: 'http://p'}\nvalidate: {inbound: report}\n",
