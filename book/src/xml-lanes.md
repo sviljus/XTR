@@ -71,10 +71,10 @@ messages:
   NotifyUnfitness_Request:
     direction: both          # in | out | both (default); a one-way message should say so
   NotifyUnfitness_Acknowledgement:
-    forward: http://old-system:8080/xml       # inbound only, see "Staged migration"
+    forward: http://legacy-receiver.internal:8080/xml       # inbound only, see "Staged migration"
 
 inbound:
-  backend: http://ruuter-internal:8080/ljvis/erru/xml-in   # POST <backend>/<Message>
+  backend: http://backend.internal:8080/erru/xml-in   # POST <backend>/<Message>
   success_status: 202        # status returned to the peer on a 2xx backend answer (default 202)
   include_raw: true          # also send `rawXml` to the backend (default true)
   relay_statuses: [400, 409, 422]   # backend 4xx codes handed to the peer as they are (default)
@@ -89,33 +89,41 @@ outbound:
   content_type: application/xml; charset=utf-8
 ```
 
-Boot is refused (with the full list) for: a missing/unparsable XSD, a
-`messages` entry that is not a global element, a lane without
-`inbound`/`outbound`, a message without backend or peer URL, an
-`inbound.path` that is not a literal absolute path or uses a reserved
-prefix (or that would shadow a DSL endpoint `/:group/:service`), a
-non-2xx `success_status`, a `relay_statuses` entry that is not 4xx, a
-`backend`/`forward` on a `direction: out` message (or `url`/`timeout_secs`
-on a `direction: in` one), a message whose `direction` needs an
-`inbound:` / `outbound:` section the sidecar does not have (or a section no
-message can use), a message name that is a global element in
-several namespaces, a `schemas:` entry with a path separator, an invalid
-`outbound.content_type`, an out-of-range `timeout_secs`, and
-peer URLs rejected by the same SSRF guard as WSDL-declared URLs
-(`wsdl.allow_http_upstream`, `wsdl.upstream_host_allowlist`).
+Boot is refused, and XTR prints the full list of faults, for each of
+these cases:
+
+* An XSD file is missing or cannot be parsed.
+* A `messages` entry is not a global element.
+* A lane has no `inbound` and no `outbound` section.
+* A message has no backend URL and no peer URL.
+* An `inbound.path` is not a literal absolute path, uses a reserved
+  prefix, or would shadow a DSL endpoint `/:group/:service`.
+* `success_status` is not a 2xx status.
+* A `relay_statuses` entry is not a 4xx status.
+* A `direction: out` message has `backend` or `forward`, or a
+  `direction: in` message has `url` or `timeout_secs`.
+* A message `direction` needs an `inbound:` or `outbound:` section that
+  the sidecar does not have, or a section exists that no message can use.
+* A message name is a global element in more than one namespace.
+* A `schemas:` entry contains a path separator.
+* `outbound.content_type` is not valid.
+* `timeout_secs` is out of range.
+* A peer URL fails the SSRF guard that also checks WSDL-declared URLs
+  (`wsdl.allow_http_upstream`, `wsdl.upstream_host_allowlist`).
 
 ## Inbound
 
-1. The body must be UTF-8 XML within `limits.max_request_bytes`
-   (413 otherwise). `DOCTYPE`/DTD is rejected (400) — no XXE or entity
-   expansion.
-2. The root element (local name **and** namespace) must be one of
-   the `messages` that can arrive (`direction: in` or `both`),
-   otherwise 400 `unsupported_message`.
-3. XTR decodes the document to JSON with the XSD as a hint (see
+1. XTR reads the body. The body must be within
+   `limits.max_request_bytes`. Otherwise XTR answers 413.
+2. XTR checks the body. The body must be UTF-8 XML. A `DOCTYPE` or DTD
+   is rejected with 400. This rule prevents XXE and entity expansion.
+3. The root element (local name **and** namespace) must be one of
+   the `messages` that can arrive (`direction: in` or `both`).
+   Otherwise XTR answers 400 `unsupported_message`.
+4. XTR decodes the document to JSON with the XSD as a hint (see
    [codec conventions](./soap-lanes.md): `@attr` keys, arrays for
    repeated elements, text never coerced).
-4. XTR POSTs to the backend:
+5. XTR POSTs to the backend:
 
    ```json
    {
@@ -129,7 +137,7 @@ peer URLs rejected by the same SSRF guard as WSDL-declared URLs
 
    plus headers `x-xtr-inbound-service`, `x-xtr-message` and the
    incoming `traceparent`.
-5. The backend decides the answer the peer sees:
+6. The backend decides the answer the peer sees:
 
    | Backend | Peer gets |
    |---|---|
@@ -154,27 +162,40 @@ peer URLs rejected by the same SSRF guard as WSDL-declared URLs
 ### Staged migration: `forward`
 
 `messages.X.forward: <url>` makes XTR POST the **received bytes
-unchanged** (same `Content-Type`) to `<url>` and relay its status and
-body to the peer. Only 2xx answers and the 4xx codes listed in
-`inbound.relay_statuses` (default 400, 409, 422) are relayed; any other
-status (3xx, 5xx, and e.g. 401/404, which usually mean a wrong target URL
-or credentials rather than a verdict on the message) becomes a plain
-502 `forward_error`, as does an unreachable target; the details only reach
-the log. A forwarded answer whose body is unreadable or over the response
-limit is relayed with an empty body (status kept, warning logged). The
-`Content-Type` of the target is kept, so the answer can be an empty
-`application/xml`. (A relayed 4xx from a *backend* is different: XTR cuts
-that body, see the table above.)
-While `XTR_OFFLINE` is set the forward is blocked too (503 `offline`). Nothing is decoded
-or stored. The target URL is checked for scheme only (like backend URLs).
-The SSRF guard of the outbound lane does not apply to `forward` and
-`backend` URLs: they are operator configuration. The forward client (and
-the backend client) has no client certificate and no custom CA. Front the
-target with an internal hop if it needs mTLS or a private CA. Use it to move one
-message type at a time from an old receiver to a new backend: list every
-message type, give the ones still served by the old system a `forward`,
-and the rest a backend. `forward` and `backend` are mutually exclusive
-per message.
+unchanged** (same `Content-Type`) to `<url>`. XTR relays the status and
+the body of the answer to the peer. XTR does not decode or store the
+message.
+
+Use `forward` to move one message type at a time from an old receiver to
+a new backend. List every message type. Give each message type that the
+old system still serves a `forward`. Give the other message types a
+backend. `forward` and `backend` are mutually exclusive per message.
+
+**Which answers XTR relays.**
+
+* A 2xx answer is relayed.
+* A 4xx code listed in `inbound.relay_statuses` (default 400, 409, 422)
+  is relayed.
+* Any other status becomes a plain 502 `forward_error`. This includes
+  3xx, 5xx, and codes such as 401 and 404. These codes usually mean a
+  wrong target URL or wrong credentials, not a verdict on the message.
+* An unreachable target also becomes 502 `forward_error`. The details
+  only reach the log.
+* An answer with an unreadable body, or a body over the response limit,
+  is relayed with an empty body. XTR keeps the status and logs a warning.
+* XTR keeps the `Content-Type` of the target. The answer can be an empty
+  `application/xml`. (A relayed 4xx from a *backend* is different: XTR
+  cuts that body, see the table above.)
+
+**Where the target is checked.**
+
+* While `XTR_OFFLINE` is set, XTR blocks the forward (503 `offline`).
+* XTR checks only the scheme of the target URL, like backend URLs.
+* The SSRF guard of the outbound lane does not apply to `forward` and
+  `backend` URLs. They are operator configuration.
+* The forward client and the backend client have no client certificate
+  and no custom CA. Put an internal hop in front of a target that needs
+  mTLS or a private CA.
 
 **Loop guard.** XTR adds the header `x-xtr-forwarded: 1` to every forwarded
 request. A message with a `forward` that arrives with this header is refused
