@@ -260,3 +260,53 @@ client_data:
     assert_eq!(run_doctor(tmp3.path(), &[]).0, 1);
     assert_eq!(run_doctor(tmp3.path(), &["--strict"]).0, 1);
 }
+
+// ---------- XSD validation of raw-XML lanes ----------
+
+fn xml_lane_with(validate: &str) -> TempDir {
+    let cfg = "xroad_protocol_version: \"4.0\"\nwsdl_watch_dir: ./wsdl\n";
+    let tmp = tmp_with_config(cfg);
+    let lane = tmp.path().join("wsdl/erru");
+    std::fs::create_dir_all(&lane).unwrap();
+    std::fs::write(
+        lane.join("m.xml.yaml"),
+        format!(
+            "schemas: [M.xsd]\nmessages: {{Msg: {{}}}}\ninbound: {{backend: 'http://b'}}\n{validate}"
+        ),
+    )
+    .unwrap();
+    tmp
+}
+
+#[test]
+fn doctor_warns_when_a_raw_xml_lane_does_not_enforce_xsd_validation() {
+    for validate in [
+        "validate: {inbound: report}\n",
+        "validate: {inbound: off}\n",
+    ] {
+        let tmp = xml_lane_with(validate);
+        let (code, stdout, _) = run_doctor(tmp.path(), &[]);
+        assert_eq!(code, 0, "{stdout}");
+        assert!(
+            stdout.contains("weak-xml-lane-validation-not-enforced"),
+            "{validate}: {stdout}"
+        );
+        assert!(stdout.contains("erru/m"), "names the lane: {stdout}");
+    }
+}
+
+#[test]
+fn doctor_is_quiet_about_validation_when_the_lane_enforces_it() {
+    for validate in [
+        "",
+        "validate: {inbound: enforce}\n",
+        "validate: {outbound: off}\n",
+    ] {
+        let tmp = xml_lane_with(validate);
+        let (_, stdout, _) = run_doctor(tmp.path(), &[]);
+        assert!(
+            !stdout.contains("weak-xml-lane-validation-not-enforced"),
+            "{validate}: {stdout}"
+        );
+    }
+}
