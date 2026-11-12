@@ -68,6 +68,16 @@ pub enum ValidateMode {
     Enforce,
 }
 
+impl ValidateMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Report => "report",
+            Self::Enforce => "enforce",
+        }
+    }
+}
+
 /// `validate:` of a sidecar.
 #[derive(Debug, Clone, Copy, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -252,8 +262,27 @@ impl LogLimit {
         self.check_at(std::time::Instant::now())
     }
 
-    fn check_at(&self, _now: std::time::Instant) -> Option<u32> {
-        Some(0)
+    fn check_at(&self, now: std::time::Instant) -> Option<u32> {
+        let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        let new_window = st
+            .window_start
+            .is_none_or(|s| now.saturating_duration_since(s) >= LOG_WINDOW);
+        if new_window {
+            let dropped = st.suppressed;
+            *st = LimitState {
+                window_start: Some(now),
+                logged: 1,
+                suppressed: 0,
+            };
+            return Some(dropped);
+        }
+        if st.logged < LOG_BURST {
+            st.logged += 1;
+            Some(0)
+        } else {
+            st.suppressed = st.suppressed.saturating_add(1);
+            None
+        }
     }
 }
 
@@ -277,7 +306,15 @@ impl XmlService {
     /// Validation mode of each served direction, for the boot log and
     /// for `xtr doctor`: `inbound=enforce outbound=report`.
     pub fn validate_summary(&self) -> String {
-        String::new()
+        let v = &self.sidecar.validate;
+        let mut parts = Vec::new();
+        if self.sidecar.inbound.is_some() {
+            parts.push(format!("inbound={}", v.inbound.as_str()));
+        }
+        if self.sidecar.outbound.is_some() {
+            parts.push(format!("outbound={}", v.outbound.as_str()));
+        }
+        parts.join(" ")
     }
 
     pub fn backend_for(&self, message: &str) -> Option<String> {
@@ -507,6 +544,8 @@ pub fn load_all(dir: Option<&Path>, cfg: &AppConfig) -> Result<XmlRegistry, Stri
         ));
     }
     for svc in reg.iter() {
+        tracing::info!(lane = %format!("{}/{}", svc.group, svc.name), validate = %svc.validate_summary(),
+            "raw-XML lane validation mode");
         let msgs: Vec<&str> = svc.messages.keys().map(String::as_str).collect();
         if svc.sidecar.inbound.is_some() {
             tracing::info!(endpoint = %format!("/xml-in/{}/{}", svc.group, svc.name), messages = ?msgs,
