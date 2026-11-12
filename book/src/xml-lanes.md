@@ -279,6 +279,9 @@ receiver answers 200 or 202 and sends an `ErrorNotification` with the
 status `InvalidFormat`. Keep `inbound: report` for such a lane. Do not
 use `enforce` on it until the backend can send the error message itself.
 
+Exception: a lane whose protocol needs an application-level error
+message keeps `inbound: report` until such a mode exists.
+
 `xtr doctor` reports a direction with `off` or `report` as WEAK. Use
 `report` for a limited time, as a step in a roll-out. It is not a
 permanent setting for a lane that must refuse invalid messages.
@@ -337,10 +340,11 @@ own system, and the effect stays with the own caller. Then turn on
 `xtr doctor`. Count the 422 and 500 answers in the first days. If the
 count is not as expected, roll back.
 
-**Roll back.** Set the direction to `report` and restart XTR. No data is
-lost. For an inbound lane, the peer must send again the messages that
-XTR refused during `enforce`. This applies only to a protocol where a
-4xx answer makes the peer send again.
+**Roll back.** Set the direction to `report` and restart XTR. The roll
+back itself loses no data. XTR did not store the messages that it
+refused during `enforce`. For an inbound lane, the peer must send again
+the messages that XTR refused during `enforce`. This applies only to a
+protocol where a 4xx answer makes the peer send again.
 
 **Who decides.** The change to `enforce` is a separate change with its
 own review. Attach the evidence of conditions 1 and 2 to it.
