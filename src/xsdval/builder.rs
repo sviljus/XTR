@@ -408,6 +408,13 @@ impl<'a> Build<'a> {
                 other => self.problem(format!("xs:{other}")),
             }
         }
+        if ct
+            .content
+            .as_ref()
+            .is_some_and(|c| !super::upa::is_deterministic(c))
+        {
+            self.problem("ambiguous content model");
+        }
         Arc::new(ct)
     }
 
