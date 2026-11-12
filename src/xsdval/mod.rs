@@ -1,0 +1,13 @@
+//! XSD validation of raw-XML lane messages, in pure Rust.
+//!
+//! Own validation model, built from the XSD documents that the lane
+//! loads. The codec model in `crate::inbound::contract` stays a codec
+//! hint and is not changed. See the ADR in `book/src/`.
+//!
+//! The model covers a small, fixed subset of XSD 1.0. A construct
+//! outside the subset that a message root reaches (also through type
+//! inheritance, attribute groups or includes) stops the boot.
+
+mod model;
+
+pub use model::{build, Model, Problem};
