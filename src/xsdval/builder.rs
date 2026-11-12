@@ -744,6 +744,12 @@ impl<'a> Build<'a> {
                 continue;
             };
             match c.local.as_str() {
+                "enumeration" | "length" | "minLength" | "maxLength"
+                    if !matches!(derived.base, Builtin::String | Builtin::Token) =>
+                {
+                    // Value-space facets of the other types are not supported.
+                    self.problem_at(c.line, format!("xs:{} on this base type", c.local));
+                }
                 "enumeration" => step
                     .enumeration
                     .get_or_insert_with(Vec::new)
@@ -752,12 +758,22 @@ impl<'a> Build<'a> {
                     Ok(re) => step.patterns.push(re),
                     Err(e) => self.problem_at(c.line, format!("pattern: {e}")),
                 },
-                "whiteSpace" => match v {
-                    "preserve" => derived.whitespace = WhiteSpace::Preserve,
-                    "replace" => derived.whitespace = WhiteSpace::Replace,
-                    "collapse" => derived.whitespace = WhiteSpace::Collapse,
-                    _ => self.problem("whiteSpace value"),
-                },
+                "whiteSpace" => {
+                    let new = match v {
+                        "preserve" => Some(WhiteSpace::Preserve),
+                        "replace" => Some(WhiteSpace::Replace),
+                        "collapse" => Some(WhiteSpace::Collapse),
+                        _ => None,
+                    };
+                    match new {
+                        None => self.problem_at(c.line, "whiteSpace value"),
+                        // XSD: a derived type may only make white space handling stricter.
+                        Some(w) if ws_rank(w) < ws_rank(derived.whitespace) => {
+                            self.problem_at(c.line, "whiteSpace looser than the base type");
+                        }
+                        Some(w) => derived.whitespace = w,
+                    }
+                }
                 "length" | "minLength" | "maxLength" => match v.parse::<usize>() {
                     Ok(n) => match c.local.as_str() {
                         "length" => step.length = Some(n),
@@ -784,5 +800,13 @@ impl<'a> Build<'a> {
         }
         derived.steps.push(step);
         Some(Arc::new(derived))
+    }
+}
+
+fn ws_rank(w: WhiteSpace) -> u8 {
+    match w {
+        WhiteSpace::Preserve => 0,
+        WhiteSpace::Replace => 1,
+        WhiteSpace::Collapse => 2,
     }
 }

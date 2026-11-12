@@ -135,8 +135,25 @@ fn schema_invalid(violations: &[Violation]) -> Response {
         .into_response()
 }
 
+/// The validation gate of one message. `Err` is an internal error, not a
+/// verdict: validation is on but the lane has no model, or the validator
+/// failed. A lane must never skip validation in silence.
+fn gate(
+    mode: ValidateMode,
+    model: Option<&Model>,
+    root: &dom::Element,
+) -> Result<Vec<Violation>, ()> {
+    match (mode, model) {
+        (ValidateMode::Off, _) => Ok(Vec::new()),
+        (_, None) => Err(()),
+        (_, Some(m)) => run_validator(m, root),
+    }
+}
+
 /// Runs the validator. A panic inside it is an internal error, not a
-/// verdict on the message.
+/// verdict on the message. `catch_unwind` needs `panic = "unwind"`, the
+/// default of Cargo profiles. With `panic = "abort"` a panic would stop the
+/// process.
 fn run_validator(model: &Model, root: &dom::Element) -> Result<Vec<Violation>, ()> {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         xsdval::validate(model, root)
@@ -277,29 +294,25 @@ async fn handle_inbound(
             &format!("root element {} is not served by this endpoint", root.local),
         );
     };
-    if svc.sidecar.validate.inbound != ValidateMode::Off {
-        if let Some(model) = &svc.model {
-            match run_validator(model, &root) {
-                Err(()) => {
-                    tracing::error!(group, name, message = ?root.local, "XSD validator failed");
-                    return err(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "validator_failed",
-                        "the validator failed",
-                    );
-                }
-                Ok(v) => {
-                    if let Some(resp) = judge(
-                        svc.sidecar.validate.inbound,
-                        group,
-                        name,
-                        &root.local,
-                        "inbound",
-                        &v,
-                    ) {
-                        return resp;
-                    }
-                }
+    match gate(svc.sidecar.validate.inbound, svc.model.as_deref(), &root) {
+        Err(()) => {
+            tracing::error!(group, name, message = ?root.local, "XSD validator failed");
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "validator_failed",
+                "the validator failed",
+            );
+        }
+        Ok(v) => {
+            if let Some(resp) = judge(
+                svc.sidecar.validate.inbound,
+                group,
+                name,
+                &root.local,
+                "inbound",
+                &v,
+            ) {
+                return resp;
             }
         }
     }
@@ -459,39 +472,39 @@ async fn call_outbound(
     }
     let element = codec::json_to_root_element(&msg.qname, &value, &svc.schema);
     let xml = format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?>{element}");
-    if svc.sidecar.validate.outbound != ValidateMode::Off {
-        if let Some(model) = &svc.model {
-            // Validate the bytes that go to the peer, read back by the same
-            // parser that reads inbound messages.
-            let checked = dom::parse_message(&xml)
-                .map_err(|_| ())
-                .and_then(|root| run_validator(model, &root));
-            match checked {
-                Err(()) => {
-                    tracing::error!(
-                        group,
-                        name,
-                        message,
-                        "XSD validator failed on an outbound request"
-                    );
-                    return Ok(err(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "validator_failed",
-                        "the validator failed",
-                    ));
-                }
-                Ok(v) => {
-                    if let Some(resp) = judge(
-                        svc.sidecar.validate.outbound,
-                        group,
-                        name,
-                        message,
-                        "outbound",
-                        &v,
-                    ) {
-                        return Ok(resp);
-                    }
-                }
+    // Validate the bytes that go to the peer, read back by the same parser
+    // that reads inbound messages.
+    let checked = if svc.sidecar.validate.outbound == ValidateMode::Off {
+        Ok(Vec::new())
+    } else {
+        dom::parse_message(&xml)
+            .map_err(|_| ())
+            .and_then(|root| gate(svc.sidecar.validate.outbound, svc.model.as_deref(), &root))
+    };
+    match checked {
+        Err(()) => {
+            tracing::error!(
+                group,
+                name,
+                message,
+                "XSD validator failed on an outbound request"
+            );
+            return Ok(err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "validator_failed",
+                "the validator failed",
+            ));
+        }
+        Ok(v) => {
+            if let Some(resp) = judge(
+                svc.sidecar.validate.outbound,
+                group,
+                name,
+                message,
+                "outbound",
+                &v,
+            ) {
+                return Ok(resp);
             }
         }
     }
@@ -632,4 +645,17 @@ async fn forward_raw(
         r.headers_mut().insert(header::CONTENT_TYPE, ct);
     }
     r
+}
+
+#[cfg(test)]
+mod gate_tests {
+    use super::*;
+
+    #[test]
+    fn validation_that_is_on_but_has_no_model_is_an_internal_error() {
+        let root = dom::parse(r#"<a xmlns="urn:x"/>"#).unwrap();
+        assert!(gate(ValidateMode::Enforce, None, &root).is_err());
+        assert!(gate(ValidateMode::Report, None, &root).is_err());
+        assert_eq!(gate(ValidateMode::Off, None, &root), Ok(Vec::new()));
+    }
 }

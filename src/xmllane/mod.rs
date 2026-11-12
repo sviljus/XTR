@@ -368,25 +368,10 @@ pub fn weak_validation(dir: Option<&Path>) -> Vec<String> {
         let Ok(x) = serde_yaml_ng::from_str::<XmlSidecar>(&text) else {
             continue;
         };
-        let rel: Vec<String> = sc
-            .parent()
-            .and_then(|p| p.strip_prefix(root).ok())
-            .map(|p| {
-                p.components()
-                    .filter_map(|c| c.as_os_str().to_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let file = sc.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        let stem = file
-            .strip_suffix(".xml.yaml")
-            .or_else(|| file.strip_suffix(".xml.yml"))
-            .unwrap_or(file);
-        let lane = match rel.as_slice() {
-            [] => stem.to_string(),
-            [g] => format!("{g}/{stem}"),
-            [g, rest @ ..] => format!("{g}/{}-{stem}", rest.join("-")),
+        let Ok((group, name)) = lane_id(root, &sc) else {
+            continue;
         };
+        let lane = format!("{group}/{name}");
         let mut weak = Vec::new();
         for (served, name, mode) in [
             (x.inbound.is_some(), "inbound", x.validate.inbound),
