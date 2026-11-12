@@ -715,17 +715,7 @@ impl<'a> Build<'a> {
     fn restriction(&mut self, d: usize, el: &'a Element) -> Option<Arc<SimpleType>> {
         self.line = el.line;
         self.check_attrs(el, &["base"], &[]);
-        let mut base: Option<Arc<SimpleType>> = None;
-        match el.attr("base") {
-            Some(b) => base = self.simple_ref(el, b),
-            None => {
-                if let Some(inner) = el.elements().find(|c| is_xs(c) && c.local == "simpleType") {
-                    base = self.simple_def(d, inner);
-                } else {
-                    self.problem("restriction without a base");
-                }
-            }
-        }
+        let base = self.restriction_base(d, el);
         let mut derived = (*base?).clone();
         let mut step = Step {
             loc: SrcLoc {
@@ -743,71 +733,93 @@ impl<'a> Build<'a> {
                 self.problem(format!("xs:{} without value", c.local));
                 continue;
             };
-            match c.local.as_str() {
-                "enumeration" | "length" | "minLength" | "maxLength"
-                    if !matches!(derived.base, Builtin::String | Builtin::Token) =>
-                {
-                    // Value-space facets of the other types are not supported.
-                    self.problem_at(c.line, format!("xs:{} on this base type", c.local));
-                }
-                "enumeration" => step
-                    .enumeration
-                    .get_or_insert_with(Vec::new)
-                    .push(v.to_string()),
-                "pattern" => match super::pattern::compile(v) {
-                    Ok(re) => step.patterns.push(re),
-                    Err(e) => self.problem_at(c.line, format!("pattern: {e}")),
-                },
-                "whiteSpace" => {
-                    let new = match v {
-                        "preserve" => Some(WhiteSpace::Preserve),
-                        "replace" => Some(WhiteSpace::Replace),
-                        "collapse" => Some(WhiteSpace::Collapse),
-                        _ => None,
-                    };
-                    match new {
-                        None => self.problem_at(c.line, "whiteSpace value"),
-                        // XSD: a derived type may only make white space handling stricter.
-                        Some(w) if ws_rank(w) < ws_rank(derived.whitespace) => {
-                            self.problem_at(c.line, "whiteSpace looser than the base type");
-                        }
-                        Some(w) => derived.whitespace = w,
-                    }
-                }
-                "length" | "minLength" | "maxLength" => match v.parse::<usize>() {
-                    Ok(n) => match c.local.as_str() {
-                        "length" => step.length = Some(n),
-                        "minLength" => step.min_length = Some(n),
-                        _ => step.max_length = Some(n),
-                    },
-                    Err(_) => self.problem(format!("xs:{} value", c.local)),
-                },
-                "minInclusive" => {
-                    if matches!(
-                        derived.base,
-                        Builtin::NonNegativeInteger
-                            | Builtin::PositiveInteger
-                            | Builtin::Date
-                            | Builtin::DateTime
-                    ) {
-                        // The bound must be a value of the base type.
-                        if super::validate::lexical_ok(derived.base, v.trim()) {
-                            step.min_inclusive = Some(v.trim().to_string());
-                        } else {
-                            self.problem_at(
-                                c.line,
-                                "xs:minInclusive value does not fit the base type",
-                            );
-                        }
-                    } else {
-                        self.problem_at(c.line, "xs:minInclusive on this base type");
-                    }
-                }
-                other => self.problem_at(c.line, format!("xs:{other}")),
-            }
+            self.apply_facet(c, v, &mut derived, &mut step);
         }
         derived.steps.push(step);
         Some(Arc::new(derived))
+    }
+
+    /// The base type of a restriction: `base=` or an inline `xs:simpleType`.
+    fn restriction_base(&mut self, d: usize, el: &'a Element) -> Option<Arc<SimpleType>> {
+        match el.attr("base") {
+            Some(b) => self.simple_ref(el, b),
+            None => {
+                let inner = el.elements().find(|c| is_xs(c) && c.local == "simpleType");
+                match inner {
+                    Some(inner) => self.simple_def(d, inner),
+                    None => {
+                        self.problem("restriction without a base");
+                        None
+                    }
+                }
+            }
+        }
+    }
+
+    /// One facet of a restriction. `derived` and `step` collect the result.
+    fn apply_facet(&mut self, c: &Element, v: &str, derived: &mut SimpleType, step: &mut Step) {
+        match c.local.as_str() {
+            "enumeration" | "length" | "minLength" | "maxLength"
+                if !matches!(derived.base, Builtin::String | Builtin::Token) =>
+            {
+                // Value-space facets of the other types are not supported.
+                self.problem_at(c.line, format!("xs:{} on this base type", c.local));
+            }
+            "enumeration" => step
+                .enumeration
+                .get_or_insert_with(Vec::new)
+                .push(v.to_string()),
+            "pattern" => match super::pattern::compile(v) {
+                Ok(re) => step.patterns.push(re),
+                Err(e) => self.problem_at(c.line, format!("pattern: {e}")),
+            },
+            "whiteSpace" => self.facet_white_space(c, v, derived),
+            "length" | "minLength" | "maxLength" => match v.parse::<usize>() {
+                Ok(n) => match c.local.as_str() {
+                    "length" => step.length = Some(n),
+                    "minLength" => step.min_length = Some(n),
+                    _ => step.max_length = Some(n),
+                },
+                Err(_) => self.problem(format!("xs:{} value", c.local)),
+            },
+            "minInclusive" => self.facet_min_inclusive(c, v, derived.base, step),
+            other => self.problem_at(c.line, format!("xs:{other}")),
+        }
+    }
+
+    fn facet_white_space(&mut self, c: &Element, v: &str, derived: &mut SimpleType) {
+        let new = match v {
+            "preserve" => Some(WhiteSpace::Preserve),
+            "replace" => Some(WhiteSpace::Replace),
+            "collapse" => Some(WhiteSpace::Collapse),
+            _ => None,
+        };
+        match new {
+            None => self.problem_at(c.line, "whiteSpace value"),
+            // XSD: a derived type may only make white space handling stricter.
+            Some(w) if ws_rank(w) < ws_rank(derived.whitespace) => {
+                self.problem_at(c.line, "whiteSpace looser than the base type");
+            }
+            Some(w) => derived.whitespace = w,
+        }
+    }
+
+    fn facet_min_inclusive(&mut self, c: &Element, v: &str, base: Builtin, step: &mut Step) {
+        let ordered = matches!(
+            base,
+            Builtin::NonNegativeInteger
+                | Builtin::PositiveInteger
+                | Builtin::Date
+                | Builtin::DateTime
+        );
+        if !ordered {
+            self.problem_at(c.line, "xs:minInclusive on this base type");
+        } else if super::validate::lexical_ok(base, v.trim()) {
+            // The bound must be a value of the base type.
+            step.min_inclusive = Some(v.trim().to_string());
+        } else {
+            self.problem_at(c.line, "xs:minInclusive value does not fit the base type");
+        }
     }
 }
 
