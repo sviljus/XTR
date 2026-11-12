@@ -12,9 +12,11 @@ mod builder;
 mod model;
 mod pattern;
 mod upa;
+mod validate;
 
 pub use model::{
     build, AttributeDecl, Builtin, ComplexType, ElementDecl, Model, Occurs, Particle, Problem,
     SimpleType, Step, TypeDef, WhiteSpace,
 };
 pub use pattern::compile as compile_pattern;
+pub use validate::{validate, Violation, MAX_VIOLATIONS};
