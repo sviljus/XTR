@@ -49,6 +49,9 @@ declaration. XTR refuses a message with HTTP 400 in these cases:
 
 The declaration follows XML 1.0 §2.8: `version`, then an optional
 `encoding`, then an optional `standalone`, each once, in lower case.
+`utf8` is accepted as an alias of UTF-8. A `forward` target with a strict
+XML parser can refuse it.
+
 One leading BOM is allowed. A declaration without `encoding`, or no
 declaration, is accepted.
 
@@ -260,7 +263,7 @@ Set the mode for each direction in the sidecar:
 
 ```yaml
 validate:
-  inbound: report    # off | report | enforce (default enforce)
+  inbound: report    # off | report | annotate | enforce (default enforce); annotate: inbound only
   outbound: report   # a missing key means enforce; see "Rolling out a version with validation"
 ```
 
@@ -270,20 +273,130 @@ A missing key means `enforce`.
 |------|----------|
 | `enforce` | XTR refuses a message that breaks the XSD. |
 | `report` | XTR logs the violations and passes the message on. |
+| `annotate` | Inbound only. XTR always calls the backend and tells it the verdict. The backend answers the peer. See "Annotate". |
 | `off` | XTR does not validate. |
 
 `enforce` answers HTTP 422. Use it only where the protocol of the peer
 accepts a 4xx answer. Some protocols need an application-level error
 message for an invalid message. The ERRU protocol is an example: the
 receiver answers 200 or 202 and sends an `ErrorNotification` with the
-status `InvalidFormat`. Keep `inbound: report` for such a lane. A later
-version of XTR is planned to pass the violations to the backend, so that
-the backend sends the error message. Until then, do not use `enforce` on
-such a lane.
+status `InvalidFormat`. Use `inbound: annotate` for such a lane, so that
+the backend sends the error message (see "Annotate"). Use `report` as
+the step before `annotate`, while the backend does not yet send the
+error message. Do not use `enforce` on such a lane.
 
-`xtr doctor` reports a direction with `off` or `report` as WEAK. Use
+`xtr doctor` reports a direction with `off` or `report` as WEAK. It
+reports a lane with `annotate` as INFO, because the backend owns the
+decision. Use
 `report` for a limited time, as a step in a roll-out. It is not a
 permanent setting for a lane that must refuse invalid messages.
+
+### Annotate
+
+`annotate` is an inbound mode for protocols where the receiver must send
+an application-level error message for an invalid message. XTR stays
+neutral to the protocol: XTR tells the backend the verdict, and the
+backend answers the peer.
+
+**What goes where.**
+
+| Input | XTR does |
+|-------|----------|
+| Valid message | `POST <backend>/<Message>` with `schemaValid: true`. |
+| Message that breaks the XSD | `POST <backend>/<Message>` with `schemaValid: false` and the violations. |
+| Not UTF-8, bad prolog or declaration, DOCTYPE, or unknown root | `POST <backend>/_invalid` with `schemaValid: false` and one code. |
+| Body over `limits.max_request_bytes` | HTTP 413. XTR does not call the backend. |
+| `XTR_OFFLINE` is set | HTTP 503 `offline`. XTR does not call the backend. |
+| The validator fails | HTTP 500 `validator_failed`. XTR does not call the backend. |
+
+The peer gets the answer of the backend, as in the other modes (see
+`success_status` and `relay_statuses`).
+
+**Body for a valid message.**
+
+```json
+{
+  "service": "erru/erru",
+  "message": "NotifyUnfitness_Request",
+  "request": { "Header": { "@technicalId": "…" } },
+  "sha256": "9f2c…",
+  "rawXml": "<?xml …",
+  "schemaValid": true,
+  "violations": []
+}
+```
+
+`rawXml` follows `include_raw`.
+
+**Body for a message that breaks the XSD.**
+
+```json
+{
+  "service": "erru/erru",
+  "message": "NotifyUnfitness_Request",
+  "sha256": "9f2c…",
+  "rawBase64": "PD94bWwg…",
+  "schemaValid": false,
+  "violations": [
+    {"path": "/NotifyUnfitness_Request/Header/@technicalId", "code": "attribute_missing",
+     "line": 1, "schemaFile": "Global_Types.xsd", "schemaLine": 12}
+  ]
+}
+```
+
+* `request` is absent. XTR does not decode an invalid message.
+* `rawXml` is absent. `rawBase64` carries the exact bytes. `include_raw`
+  has no effect on an invalid message.
+* The fields are at the top level of the JSON only. A violation never
+  holds a value from the message.
+
+**Body for `<backend>/_invalid`.**
+
+```json
+{
+  "service": "erru/erru",
+  "sha256": "9f2c…",
+  "rawBase64": "PGh0bWw+…",
+  "schemaValid": false,
+  "violations": [{"code": "malformed_xml"}]
+}
+```
+
+The `message` and `request` fields are absent, because XTR does not
+know the message type. The code is one of `malformed_xml`,
+`unsupported_encoding`, `doctype` and `unsupported_message`.
+`rawBase64` is used because the bytes can be invalid UTF-8.
+
+**Rules for the backend.**
+
+* The backend must not give the content of a message with
+  `schemaValid: false` to the business logic.
+* The backend must not parse `rawBase64` with an XML parser that
+  resolves entities or DTDs. The bytes come from an unauthenticated
+  sender.
+* The backend must read the identifiers it needs (for example a
+  workflow id) with a narrow and bounded method, and must check them.
+* The body of a request is about 4/3 of the size of the message, plus
+  the JSON. Check that the body limit of the backend is large enough for
+  `limits.max_request_bytes`.
+
+**Boot errors for `annotate`.**
+
+* `validate.outbound` is `annotate`.
+* A message has `forward`. `forward` sends the bytes unchanged, so the
+  old system would not learn the verdict.
+* `inbound.backend` is not set. `_invalid` needs it.
+* A message is named `_invalid`.
+
+**Exposure.** With `annotate`, every request body that reaches the lane
+goes to the backend, also input that XTR would refuse in the other modes.
+In production, restrict the inbound port to the peer (ingress mTLS or a
+network rule). `xtr doctor` reports the lane as INFO for this reason.
+
+**Roll-out.** Use `report` first. Move to `annotate` when the backend
+handles `schemaValid: false` and `/_invalid`. The change from `report`
+to `annotate` is not a change of the XTR answer only: the backend now
+decides what the peer sees.
 
 ### Rolling out a version with validation
 
@@ -359,6 +472,9 @@ before it calls the backend and before `forward`.
   the message.
 * With `report`, XTR writes the violations to the log. XTR then handles
   the message as if it were valid: it calls the backend or forwards it.
+* With `annotate`, XTR calls the backend for every message that it can
+  read, and for unreadable input it calls `<backend>/_invalid`. See
+  "Annotate".
 
 The backend can also relay a 422 (see `relay_statuses`). The peer sees
 the same status for both cases. The `error` field of the body is the
@@ -485,6 +601,9 @@ XTR caps the warn log for each lane **and** each direction: at most 10
 entries per minute. The first entry of the next minute has a `suppressed`
 count of the entries that XTR dropped. The answer to the sender is not
 capped.
+
+The same cap applies to the log entries of `annotate`, also for input
+that goes to `_invalid`.
 
 ## Not covered
 
