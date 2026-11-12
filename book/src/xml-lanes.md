@@ -276,11 +276,10 @@ A missing key means `enforce`.
 accepts a 4xx answer. Some protocols need an application-level error
 message for an invalid message. The ERRU protocol is an example: the
 receiver answers 200 or 202 and sends an `ErrorNotification` with the
-status `InvalidFormat`. Keep `inbound: report` for such a lane. Do not
-use `enforce` on it until the backend can send the error message itself.
-
-Exception: a lane whose protocol needs an application-level error
-message keeps `inbound: report` until such a mode exists.
+status `InvalidFormat`. Keep `inbound: report` for such a lane. A later
+version of XTR is planned to pass the violations to the backend, so that
+the backend sends the error message. Until then, do not use `enforce` on
+such a lane.
 
 `xtr doctor` reports a direction with `off` or `report` as WEAK. Use
 `report` for a limited time, as a step in a roll-out. It is not a
@@ -309,7 +308,8 @@ Do this only when **all** of these conditions are true:
    The test compares XTR with an independent XSD 1.0 processor (for
    example Apache Xerces). The test uses sample messages and generated
    invalid messages. Write down the date and the XTR version.
-2. The lane has run in `report` in production for the agreed period. The
+2. The lane has run in `report` in production for an agreed period (for
+   example 14 days). The
    period includes at least one real message of each message type. Every
    logged violation is explained: it is a fault of the peer, or it is a
    fault of the validator and the validator is fixed first.
@@ -346,15 +346,19 @@ refused during `enforce`. For an inbound lane, the peer must send again
 the messages that XTR refused during `enforce`. This applies only to a
 protocol where a 4xx answer makes the peer send again.
 
-**Who decides.** The change to `enforce` is a separate change with its
+**Review.** The change to `enforce` is a separate change with its
 own review. Attach the evidence of conditions 1 and 2 to it.
 
 ### Inbound
 
 XTR validates the message after the prolog and the root checks and
-before it calls the backend and before `forward`. A message that breaks
-the XSD gets HTTP 422 `schema_invalid`. XTR does not call the backend
-and does not forward the message.
+before it calls the backend and before `forward`.
+
+* With `enforce`, a message that breaks the XSD gets HTTP 422
+  `schema_invalid`. XTR does not call the backend and does not forward
+  the message.
+* With `report`, XTR writes the violations to the log. XTR then handles
+  the message as if it were valid: it calls the backend or forwards it.
 
 The backend can also relay a 422 (see `relay_statuses`). The peer sees
 the same status for both cases. The `error` field of the body is the
@@ -363,13 +367,14 @@ only difference: it is `schema_invalid` when XTR refuses the message.
 ### Outbound
 
 XTR validates the serialized request, which are the bytes that go to the
-peer. A request that breaks the XSD gets HTTP 422 `schema_invalid` to
-the caller. XTR does not send it.
+peer.
+
+* With `enforce`, a request that breaks the XSD gets HTTP 422
+  `schema_invalid` to the caller. XTR does not send it.
+* With `report`, XTR writes the violations to the log and sends the
+  request to the peer.
 
 ### Answer
-
-An internal error of the validator gives HTTP 500 `validator_failed`.
-The details go to the log only.
 
 The body of a 422 lists at most 10 violations:
 
@@ -388,12 +393,19 @@ A violation holds these fields:
 
 * `path`: the element path.
 * `code`: a rule code (see "Rule codes").
-* `line`: the line in the message where the start tag of the element is.
-  The value 0 means that the line is not known.
+* `line`: the line in the message. For a missing element
+  (`element_missing`), it is the line of the parent element. For an
+  attribute violation, it is the line of the element that has the
+  attribute. For other codes, it is the line of the start tag of the
+  element. The value 0 means that the line is not known.
 * `schemaFile` and `schemaLine`: the file and the line in the schema.
-  The file name is relative to the schema directory.
+  The file name is relative to the schema directory. The value 0 for
+  `schemaLine` means that the line is not known.
 
 A violation never holds a value from the message.
+
+An internal error of the validator gives HTTP 500 `validator_failed`.
+The details go to the log only. This applies to `enforce` and to `report`.
 
 ### Rule codes
 
@@ -450,6 +462,13 @@ file, the line and the construct. A boot error occurs in these cases:
 * An `xs:include` has another `targetNamespace`, or it is a chameleon
   include.
 * An element has `maxOccurs="0"`.
+* A type or group definition is recursive.
+* A `whiteSpace` facet is looser than the one of the base type.
+* An `enumeration` or a length facet has a base type other than `string`
+  or `token`.
+* A `minInclusive` facet has a base type or a value that does not fit
+  the base type.
+* A message name is a global element in more than one namespace.
 * A `pattern` uses a construct that XSD does not define.
 * The `validate:` section has an unknown key or an unknown mode.
 
