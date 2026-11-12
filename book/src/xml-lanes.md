@@ -116,6 +116,9 @@ these cases:
 * `outbound.content_type` is not valid.
 * `timeout_secs` is out of range.
 * The `validate:` section has an unknown key or an unknown mode.
+* `inbound.backend_headers_env` has a variable without the prefix
+  `XTR_BACKEND_HEADER_`, a forbidden or repeated header name, or a
+  variable that is not set or is empty (see "Backend headers").
 * An XSD construct is outside the supported XSD subset while validation
   is on. This includes a construct in an imported or included file.
 * A peer URL fails the SSRF guard that also checks WSDL-declared URLs
@@ -376,6 +379,9 @@ know the message type. The code is one of `malformed_xml`,
   sender.
 * The backend must read the identifiers it needs (for example a
   workflow id) with a narrow and bounded method, and must check them.
+* The backend must not answer an invalid error message of the protocol
+  with a new error message (for example an `ErrorNotification` about an
+  `ErrorNotification`). Otherwise the two sides can loop.
 * The body of a request is about 4/3 of the size of the message, plus
   the JSON. Check that the body limit of the backend is large enough for
   `limits.max_request_bytes`.
@@ -395,6 +401,41 @@ network rule). `xtr doctor` reports the lane as INFO for this reason.
 
 **Roll-out.** Use `report` first. Move to `annotate` as "Turning on enforce or
 annotate" says.
+
+### Backend headers
+
+`inbound.backend_headers_env` makes XTR add headers to the calls to
+`inbound.backend`. Use it when the backend must know that a request
+comes from XTR, for example behind a gateway guard.
+
+```yaml
+inbound:
+  backend: http://backend.internal:8080/erru/xml-in
+  backend_headers_env:
+    x-backend-token: XTR_BACKEND_HEADER_ERRU   # header name: name of the variable
+```
+
+The key is the header name. The value is the name of an environment
+variable. XTR reads the variable at boot.
+
+* The variable name must start with `XTR_BACKEND_HEADER_`. A sidecar
+  must not be able to send another secret (for example a keystore
+  password) to its backend.
+* These header names are not allowed: `host`, `transfer-encoding`,
+  `connection`, `te`, `upgrade`, `traceparent`, `forwarded`, `content-*`,
+  `x-xtr-*` and `x-forwarded-*`. A name must be a valid HTTP header name.
+  The same name twice (not case-sensitive) is an error.
+* A variable that is not set, or is empty, stops the boot.
+* The header goes only to `inbound.backend`: to the URL of a message
+  and to `<backend>/_invalid`. It does not go to a `forward` target, to a
+  message with its own `backend` URL, or to a peer.
+* XTR marks the value as sensitive. The value is not in a log, in an
+  error message or in the output of `xtr doctor`. `xtr doctor` shows
+  WEAK when the value is shorter than 32 bytes. It names the variable and
+  never prints the value.
+* XTR does not follow redirects of the backend, so the header does not
+  go to another host.
+* Use a random value of at least 32 bytes. Do not commit it.
 
 ### Rolling out a version with validation
 

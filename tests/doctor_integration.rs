@@ -327,3 +327,58 @@ fn doctor_gives_info_not_weak_for_an_annotate_lane() {
         "{stdout}"
     );
 }
+
+fn run_doctor_env(cwd: &Path, env: &[(&str, &str)]) -> (i32, String, String) {
+    let mut cmd = Command::new(BIN);
+    cmd.arg("doctor").current_dir(cwd);
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    let out = cmd.output().expect("doctor binary must be runnable");
+    (
+        out.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+#[test]
+fn doctor_warns_about_a_short_backend_header_value_and_never_prints_the_value() {
+    let lane = "validate: {inbound: enforce}\n";
+    let with_header = |tmp: &TempDir| {
+        let f = tmp.path().join("wsdl/erru/m.xml.yaml");
+        let t = std::fs::read_to_string(&f).unwrap();
+        std::fs::write(
+            &f,
+            t.replace(
+                "inbound: {backend: 'http://b'}",
+                "inbound: {backend: 'http://b', backend_headers_env: {x-backend-token: XTR_BACKEND_HEADER_DOC}}",
+            ),
+        )
+        .unwrap();
+    };
+    // Short value: WEAK, names the variable, hides the value.
+    let tmp = xml_lane_with(lane);
+    with_header(&tmp);
+    let (code, stdout, _) = run_doctor_env(
+        tmp.path(),
+        &[("XTR_BACKEND_HEADER_DOC", "shortSECRETvalue")],
+    );
+    assert_eq!(code, 0, "{stdout}");
+    assert!(
+        stdout.contains("weak-xml-lane-backend-header-short"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("XTR_BACKEND_HEADER_DOC"), "{stdout}");
+    assert!(!stdout.contains("shortSECRETvalue"), "{stdout}");
+    // Long value: quiet, and the value is still hidden.
+    let tmp = xml_lane_with(lane);
+    with_header(&tmp);
+    let long = "LONGSECRET0123456789abcdef0123456789abcdef";
+    let (_, stdout, _) = run_doctor_env(tmp.path(), &[("XTR_BACKEND_HEADER_DOC", long)]);
+    assert!(
+        !stdout.contains("weak-xml-lane-backend-header-short"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("LONGSECRET"), "{stdout}");
+}

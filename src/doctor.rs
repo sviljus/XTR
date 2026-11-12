@@ -92,8 +92,32 @@ pub fn run(cfg: &AppConfig, cfg_path: Option<&Path>) -> Vec<Finding> {
     check_soap_lanes_exposure(cfg, &mut findings);
     check_xml_lane_validation(cfg, &mut findings);
     check_xml_lane_annotate(cfg, &mut findings);
+    check_xml_lane_backend_header(cfg, &mut findings);
     add_context_info(cfg, cfg_path, &mut findings);
     findings
+}
+
+/// Raw-XML lanes whose `backend_headers_env` value is shorter than 32 bytes.
+/// The finding names the variable, never the value.
+fn check_xml_lane_backend_header(cfg: &AppConfig, out: &mut Vec<Finding>) {
+    let short = crate::xmllane::short_backend_headers(cfg.wsdl_watch_dir.as_deref());
+    if short.is_empty() {
+        return;
+    }
+    out.push(Finding {
+        severity: Severity::Weak,
+        code: "weak-xml-lane-backend-header-short".into(),
+        field: Some("inbound.backend_headers_env".into()),
+        headline: "A backend header value of a raw-XML lane is short".into(),
+        rationale: format!(
+            "The backend uses this header to know that a request comes from XTR. A\n\
+             short value is easy to guess. Use a random value of at least {} bytes.\n\n\
+             Lane and variable:\n  {}",
+            crate::xmllane::BACKEND_HEADER_MIN_LEN,
+            short.join("\n  ")
+        ),
+        recovery: Some("Set the variable to a random value of at least 32 bytes.".into()),
+    });
 }
 
 /// Raw-XML lanes in `annotate` mode: XTR passes every request body that

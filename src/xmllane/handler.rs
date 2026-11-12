@@ -275,7 +275,6 @@ async fn handle_annotated(
         );
     }
     let digest = hex(&Sha256::digest(body));
-    let raw_b64 = base64::engine::general_purpose::STANDARD.encode(body);
     // Input that is not a message of the lane goes to `_invalid`.
     let text = std::str::from_utf8(body).map_err(|_| "unsupported_encoding");
     let parsed = match text {
@@ -297,7 +296,7 @@ async fn handle_annotated(
                 (group, name),
                 &service,
                 &digest,
-                &raw_b64,
+                body,
                 code,
             )
             .await;
@@ -316,7 +315,7 @@ async fn handle_annotated(
             (group, name),
             &service,
             &digest,
-            &raw_b64,
+            body,
             "unsupported_message",
         )
         .await;
@@ -369,12 +368,21 @@ async fn handle_annotated(
             "service": service,
             "message": root.local,
             "sha256": digest,
-            "rawBase64": raw_b64,
+            "rawBase64": base64::engine::general_purpose::STANDARD.encode(body),
             "schemaValid": false,
             "violations": violations.iter().map(violation_json).collect::<Vec<_>>(),
         })
     };
-    call_backend(st, ib, &url, &payload, (group, name, &root.local), headers).await
+    call_backend(
+        st,
+        ib,
+        &url,
+        &payload,
+        (group, name, &root.local),
+        headers,
+        lane_headers(svc, &root.local),
+    )
+    .await
 }
 
 /// Sends input that is not a message of the lane to `<backend>/_invalid`.
@@ -387,9 +395,10 @@ async fn send_invalid(
     (group, name): (&str, &str),
     service: &str,
     digest: &str,
-    raw_b64: &str,
+    body: &[u8],
     code: &'static str,
 ) -> Response {
+    use base64::Engine;
     // The sidecar check guarantees `inbound.backend` under `annotate`.
     let base = ib.backend.as_deref().unwrap_or_default();
     let url = format!("{}/{}", base.trim_end_matches('/'), super::INVALID_ROUTE);
@@ -406,7 +415,7 @@ async fn send_invalid(
     let payload = json!({
         "service": service,
         "sha256": digest,
-        "rawBase64": raw_b64,
+        "rawBase64": base64::engine::general_purpose::STANDARD.encode(body),
         "schemaValid": false,
         "violations": [{"code": code}],
     });
@@ -417,6 +426,7 @@ async fn send_invalid(
         &payload,
         (group, name, super::INVALID_ROUTE),
         headers,
+        &svc.backend_headers,
     )
     .await
 }
@@ -547,7 +557,26 @@ async fn handle_inbound(
     if ib.include_raw {
         payload["rawXml"] = Value::String(text.to_string());
     }
-    call_backend(st, ib, &url, &payload, (group, name, &root.local), headers).await
+    call_backend(
+        st,
+        ib,
+        &url,
+        &payload,
+        (group, name, &root.local),
+        headers,
+        lane_headers(svc, &root.local),
+    )
+    .await
+}
+
+/// The extra headers for the backend of a message: only when the URL comes
+/// from `inbound.backend`.
+fn lane_headers<'a>(svc: &'a XmlService, message: &str) -> &'a [(header::HeaderName, HeaderValue)] {
+    if svc.backend_is_lane(message) {
+        &svc.backend_headers
+    } else {
+        &[]
+    }
 }
 
 /// POSTs the payload to the backend and maps its answer to the answer for
@@ -559,6 +588,7 @@ async fn call_backend(
     payload: &Value,
     (group, name, msg_type): (&str, &str, &str),
     headers: &HeaderMap,
+    extra: &[(header::HeaderName, HeaderValue)],
 ) -> Response {
     let mut req = st
         .backend
@@ -568,6 +598,9 @@ async fn call_backend(
         .json(payload);
     if let Some(tp) = headers.get("traceparent") {
         req = req.header("traceparent", tp.clone());
+    }
+    for (n, v) in extra {
+        req = req.header(n.clone(), v.clone());
     }
     let resp = match req.send().await {
         Ok(r) => r,
