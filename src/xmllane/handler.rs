@@ -222,7 +222,7 @@ async fn handle_inbound(
         // before the outbound call. A forwarded message that goes to a
         // backend is not a loop.
         if headers.contains_key(FORWARDED_HEADER) {
-            tracing::warn!(group, name, message = ?root.local, "forward loop detected");
+            tracing::warn!(group, name, msg_type = ?root.local, "forward loop detected");
             return err(
                 StatusCode::LOOP_DETECTED,
                 "loop_detected",
@@ -239,7 +239,7 @@ async fn handle_inbound(
         );
     };
     if st.offline {
-        tracing::info!(message = ?root.local, "inbound XML backend call blocked by XTR_OFFLINE");
+        tracing::info!(msg_type = ?root.local, "inbound XML backend call blocked by XTR_OFFLINE");
         return err(
             StatusCode::SERVICE_UNAVAILABLE,
             "offline",
@@ -273,7 +273,7 @@ async fn handle_inbound(
     let resp = match req.send().await {
         Ok(r) => r,
         Err(e) => {
-            tracing::warn!(message = ?root.local, url = ?url, error = ?e.to_string(), "inbound XML backend call failed");
+            tracing::warn!(msg_type = ?root.local, url = ?url, error = ?e.to_string(), "inbound XML backend call failed");
             return if e.is_timeout() {
                 err(
                     StatusCode::GATEWAY_TIMEOUT,
@@ -309,7 +309,7 @@ async fn handle_inbound(
     }
     // 5xx and any 4xx outside `relay_statuses` (wrong backend path,
     // gateway guard …): not a verdict on the message — the peer must retry.
-    tracing::warn!(message = ?root.local, status = status.as_u16(), "inbound XML backend failed");
+    tracing::warn!(msg_type = ?root.local, status = status.as_u16(), "inbound XML backend failed");
     err(StatusCode::BAD_GATEWAY, "backend_error", "backend failed")
 }
 
@@ -368,7 +368,7 @@ async fn call_outbound(
         }
     };
     if st.offline {
-        tracing::info!(message = ?message, "outbound XML blocked by XTR_OFFLINE");
+        tracing::info!(msg_type = ?message, "outbound XML blocked by XTR_OFFLINE");
         return Err(XtrError::OfflineMode);
     }
     let element = codec::json_to_root_element(&msg.qname, &value, &svc.schema);
@@ -390,7 +390,7 @@ async fn call_outbound(
         Err(e) => {
             // Not "the peer said no": we do not know what happened.
             // The URL stays in the log, not in the response.
-            tracing::warn!(message = ?message, url = ?url, error = ?e.to_string(), "outbound XML peer unreachable");
+            tracing::warn!(msg_type = ?message, url = ?url, error = ?e.to_string(), "outbound XML peer unreachable");
             return Ok(err(
                 StatusCode::BAD_GATEWAY,
                 "upstream_unreachable",
@@ -468,7 +468,7 @@ async fn forward_raw(
     let resp = match req.send().await {
         Ok(r) => r,
         Err(e) => {
-            tracing::warn!(message = ?message, error = ?e.to_string(), "forward target call failed");
+            tracing::warn!(msg_type = ?message, error = ?e.to_string(), "forward target call failed");
             return if e.is_timeout() {
                 err(
                     StatusCode::GATEWAY_TIMEOUT,
@@ -492,7 +492,7 @@ async fn forward_raw(
     // only when it is a verdict on the message (`relay_statuses`); 3xx, 5xx
     // and other 4xx are infrastructure faults: details stay in the log.
     if !(status.is_success() || relay_statuses.contains(&status.as_u16())) {
-        tracing::warn!(message = ?message, status = status.as_u16(), "forward target failed");
+        tracing::warn!(msg_type = ?message, status = status.as_u16(), "forward target failed");
         return err(
             StatusCode::BAD_GATEWAY,
             "forward_error",
@@ -500,7 +500,7 @@ async fn forward_raw(
         );
     }
     let text = if truncated || failed {
-        tracing::warn!(message = ?message, status = status.as_u16(), truncated, failed, "forward target body dropped");
+        tracing::warn!(msg_type = ?message, status = status.as_u16(), truncated, failed, "forward target body dropped");
         Vec::new()
     } else {
         bytes
