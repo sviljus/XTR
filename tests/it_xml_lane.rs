@@ -1217,3 +1217,178 @@ async fn inbound_refuses_declarations_that_break_the_declaration_grammar() {
     }
     assert!(seen.lock().unwrap().is_empty());
 }
+
+// ------------------------------------------------------ XSD validation
+
+/// `Notify_Request` without the required `technicalId` attribute.
+const NOTIFY_INVALID: &str = r#"<?xml version="1.0" encoding="UTF-8"?><Notify_Request xmlns="urn:erru"><Header workflowId="w-1"/><Body businessCaseId="SECRET-4711"><TransportManager firstName="Anna"/></Body></Notify_Request>"#;
+
+fn with_validate(sidecar: &str, validate: &str) -> String {
+    format!("{sidecar}validate: {validate}\n")
+}
+
+#[tokio::test]
+async fn inbound_enforce_refuses_a_schema_invalid_message_before_the_backend() {
+    let (backend, seen) = spawn_backend().await;
+    // No `validate:` key means `enforce`.
+    let env = build(&inbound_sidecar(&backend));
+    let (st, body, _) = call(&env.app, xml_post("/xml-in/erru/msg", NOTIFY_INVALID)).await;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    let v: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["error"], "schema_invalid");
+    let first = &v["violations"][0];
+    assert_eq!(first["code"], "attribute_missing");
+    assert_eq!(first["path"], "/Notify_Request/Header/@technicalId");
+    assert_eq!(first["schemaFile"], "Global_Types.xsd");
+    assert!(first["schemaLine"].as_u64().unwrap() > 0);
+    assert!(first["line"].as_u64().unwrap() > 0);
+    assert!(!body.contains("SECRET-4711"), "no message value: {body}");
+    assert!(
+        !body.contains("/tmp") && !body.contains("/var/"),
+        "no absolute path: {body}"
+    );
+    assert!(
+        seen.lock().unwrap().is_empty(),
+        "the backend must not be called"
+    );
+}
+
+#[tokio::test]
+async fn inbound_valid_message_passes_in_every_mode() {
+    for mode in ["{inbound: enforce}", "{inbound: report}", "{inbound: off}"] {
+        let (backend, seen) = spawn_backend().await;
+        let env = build(&with_validate(&inbound_sidecar(&backend), mode));
+        let (st, body, _) = call(&env.app, xml_post("/xml-in/erru/msg", NOTIFY_XML)).await;
+        assert_eq!(st, StatusCode::ACCEPTED, "{mode}: {body}");
+        assert_eq!(seen.lock().unwrap().len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn inbound_report_and_off_let_an_invalid_message_through() {
+    for mode in ["{inbound: report}", "{inbound: off}"] {
+        let (backend, seen) = spawn_backend().await;
+        let env = build(&with_validate(&inbound_sidecar(&backend), mode));
+        let (st, body, _) = call(&env.app, xml_post("/xml-in/erru/msg", NOTIFY_INVALID)).await;
+        assert_eq!(st, StatusCode::ACCEPTED, "{mode}: {body}");
+        assert_eq!(seen.lock().unwrap().len(), 1, "{mode}");
+    }
+}
+
+#[tokio::test]
+async fn inbound_enforce_refuses_an_invalid_message_before_forward() {
+    let (target, raw) = spawn_peer(202, "").await;
+    let sidecar = format!(
+        "schemas: [Msg.xsd]\nmessages:\n  Notify_Request: {{forward: '{target}'}}\ninbound: {{}}\n"
+    );
+    let env = build(&sidecar);
+    let (st, body, _) = call(&env.app, xml_post("/xml-in/erru/msg", NOTIFY_INVALID)).await;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert!(raw.lock().unwrap().is_empty(), "nothing may be forwarded");
+}
+
+#[tokio::test]
+async fn outbound_enforce_does_not_send_an_invalid_request() {
+    let (hub, raw) = spawn_peer(202, "").await;
+    let env = build(&outbound_sidecar(&hub));
+    let mut bad = notify_json();
+    bad["Header"]
+        .as_object_mut()
+        .unwrap()
+        .remove("@technicalId");
+    let (st, body, _) = call(
+        &env.app,
+        json_post("/xml-out/erru/msg/Notify_Request", &bad),
+    )
+    .await;
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    let v: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["error"], "schema_invalid");
+    assert_eq!(v["violations"][0]["code"], "attribute_missing");
+    assert!(
+        raw.lock().unwrap().is_empty(),
+        "the peer must not be called"
+    );
+}
+
+#[tokio::test]
+async fn outbound_report_and_off_send_an_invalid_request() {
+    for mode in ["{outbound: report}", "{outbound: off}"] {
+        let (hub, raw) = spawn_peer(202, "").await;
+        let env = build(&with_validate(&outbound_sidecar(&hub), mode));
+        let mut bad = notify_json();
+        bad["Header"]
+            .as_object_mut()
+            .unwrap()
+            .remove("@technicalId");
+        let (st, body, _) = call(
+            &env.app,
+            json_post("/xml-out/erru/msg/Notify_Request", &bad),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{mode}: {body}");
+        assert_eq!(raw.lock().unwrap().len(), 1, "{mode}");
+    }
+}
+
+#[tokio::test]
+async fn outbound_valid_request_is_sent_with_enforce() {
+    let (hub, raw) = spawn_peer(202, "").await;
+    let env = build(&outbound_sidecar(&hub));
+    let (st, body, _) = call(
+        &env.app,
+        json_post("/xml-out/erru/msg/Notify_Request", &notify_json()),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    assert_eq!(raw.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn validate_modes_are_checked_at_boot() {
+    let base =
+        "schemas: [Msg.xsd]\nmessages: {Notify_Request: {}}\ninbound: {backend: 'http://b'}\n";
+    for bad in [
+        "{inbound: maybe}",
+        "{inbound: ENFORCE}",
+        "{inboud: enforce}",
+        "enforce",
+    ] {
+        let e = load_err(&with_validate(base, bad));
+        assert!(!e.is_empty(), "{bad} must refuse boot");
+    }
+    // `validate:` may name one direction only.
+    let xsd = write_lane(&with_validate(base, "{outbound: off}"));
+    let dsl = TempDir::new().unwrap();
+    let cfg = cfg_for(&xsd, &dsl);
+    assert!(xmllane::load_all(Some(xsd.path()), &cfg).is_ok());
+}
+
+const ANY_XSD: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" targetNamespace="urn:erru"
+    xmlns="urn:erru" elementFormDefault="qualified">
+  <xs:element name="Notify_Request"><xs:complexType><xs:sequence>
+    <xs:any/>
+  </xs:sequence></xs:complexType></xs:element>
+</xs:schema>"#;
+
+#[test]
+fn an_unsupported_xsd_construct_refuses_boot_unless_validation_is_off() {
+    let base =
+        "schemas: [Msg.xsd]\nmessages: {Notify_Request: {}}\ninbound: {backend: 'http://b'}\n";
+    let write = |sidecar: &str| {
+        let xsd = write_lane(sidecar);
+        std::fs::write(xsd.path().join("erru/Msg.xsd"), ANY_XSD).unwrap();
+        xsd
+    };
+    let dsl = TempDir::new().unwrap();
+    let xsd = write(base);
+    let e = xmllane::load_all(Some(xsd.path()), &cfg_for(&xsd, &dsl)).unwrap_err();
+    assert!(e.contains("xs:any"), "names the construct: {e}");
+    assert!(e.contains("Msg.xsd:"), "names the file and the line: {e}");
+    let xsd = write(&with_validate(base, "{inbound: off, outbound: off}"));
+    assert!(xmllane::load_all(Some(xsd.path()), &cfg_for(&xsd, &dsl)).is_ok());
+    // The same schema in a lane with enforce in one direction still fails.
+    let xsd = write(&with_validate(base, "{inbound: off}"));
+    assert!(xmllane::load_all(Some(xsd.path()), &cfg_for(&xsd, &dsl)).is_err());
+}
