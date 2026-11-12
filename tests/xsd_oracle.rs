@@ -173,6 +173,8 @@ struct Report {
     owner_approved: BTreeMap<String, usize>,
     /// Files that hit `utf8_label`. The oracle runs them again with the label replaced.
     utf8_files: Vec<String>,
+    /// XTR result (`Debug` text) of each `utf8_label` file before the label is replaced.
+    utf8_rust: BTreeMap<String, String>,
     /// A strict report allows no owner-approved difference.
     strict: bool,
     diffs: Vec<String>,
@@ -251,6 +253,7 @@ fn compare(rep: &mut Report, r: &Value, rust: &Rust, text: &str, allowed_ids: &B
             {
                 *rep.owner_approved.entry("utf8_label".into()).or_default() += 1;
                 rep.utf8_files.push(file.to_string());
+                rep.utf8_rust.insert(file.to_string(), format!("{rust:?}"));
             } else {
                 rep.diffs.push(format!(
                     "{file}: Xerces says {verdict}, XTR accepted the message"
@@ -323,21 +326,38 @@ fn rerun_utf8_label(xsd: &Path, msgs: &Path, rep: &mut Report) {
         std::fs::write(tmp.path().join(f), replace_utf8_label(&text)).unwrap();
     }
     let Some(out) = oracle(xsd, tmp.path()) else {
+        // The first run had the oracle. A missing oracle now is a fault, not a skip.
+        rep.diffs
+            .push("utf8_label rerun: the oracle gave no result for the changed messages".into());
         return;
     };
+    let results = out["results"].as_array().unwrap();
+    if results.len() != rep.utf8_files.len() {
+        rep.diffs.push(format!(
+            "utf8_label rerun: {} results for {} messages",
+            results.len(),
+            rep.utf8_files.len()
+        ));
+    }
     let mut models = Models::new(xsd);
     let mut strict = Report {
         strict: true,
         ..Report::default()
     };
     let none = BTreeSet::new();
-    for r in out["results"].as_array().unwrap() {
+    for r in results {
         let f = r["file"].as_str().unwrap();
         let bytes = std::fs::read(tmp.path().join(f)).unwrap();
         let rust = match r["schema"].as_str() {
             Some(schema) => models.check(schema, &bytes),
             None => Rust::Done(vec![]),
         };
+        // The change of the label must not change what XTR says.
+        if rep.utf8_rust.get(f).map(String::as_str) != Some(format!("{rust:?}").as_str()) {
+            rep.diffs.push(format!(
+                "utf8_label rerun: XTR gives another result for {f} after the label is replaced"
+            ));
+        }
         compare(
             &mut strict,
             r,
