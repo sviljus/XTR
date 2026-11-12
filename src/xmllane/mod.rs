@@ -298,8 +298,11 @@ pub struct XmlService {
     /// XSD validation model. Built at boot when a served direction
     /// validates.
     pub model: Option<Arc<crate::xsdval::Model>>,
-    /// Rate cap of the warn log of validation violations.
-    pub log_limit: LogLimit,
+    /// Rate caps of the warn log of validation violations. One per
+    /// direction: a flood of invalid inbound messages must not hide the
+    /// violations of the own outbound requests.
+    pub log_limit_inbound: LogLimit,
+    pub log_limit_outbound: LogLimit,
 }
 
 impl XmlService {
@@ -591,7 +594,8 @@ fn prepare(root: &Path, sidecar: &Path, cfg: &AppConfig) -> Result<XmlService, S
         sidecar: sc,
         http,
         model,
-        log_limit: LogLimit::default(),
+        log_limit_inbound: LogLimit::default(),
+        log_limit_outbound: LogLimit::default(),
     })
 }
 
@@ -953,6 +957,30 @@ mod validate_tests {
     }
 
     #[test]
+    fn a_full_inbound_limiter_does_not_block_the_outbound_one() {
+        let svc = lane("schemas: [a.xsd]\nmessages: {M: {}}\ninbound: {backend: 'http://b'}\noutbound: {url: 'http://p'}\n");
+        for _ in 0..LOG_BURST {
+            assert!(svc.log_limit_inbound.check().is_some());
+        }
+        assert_eq!(svc.log_limit_inbound.check(), None, "inbound is full");
+        assert_eq!(svc.log_limit_outbound.check(), Some(0), "outbound is not");
+    }
+
+    fn lane(sidecar: &str) -> XmlService {
+        XmlService {
+            group: "g".into(),
+            name: "n".into(),
+            schema: Schema::default(),
+            messages: BTreeMap::new(),
+            sidecar: serde_yaml_ng::from_str::<XmlSidecar>(sidecar).unwrap(),
+            http: None,
+            model: None,
+            log_limit_inbound: LogLimit::default(),
+            log_limit_outbound: LogLimit::default(),
+        }
+    }
+
+    #[test]
     fn a_quiet_lane_logs_every_entry_without_a_suppressed_count() {
         let l = LogLimit::default();
         let t0 = Instant::now();
@@ -971,7 +999,8 @@ mod validate_tests {
             sidecar,
             http: None,
             model: None,
-            log_limit: LogLimit::default(),
+            log_limit_inbound: LogLimit::default(),
+            log_limit_outbound: LogLimit::default(),
         };
         let both = svc(sc(
             "schemas: [a.xsd]\nmessages: {M: {}}\ninbound: {backend: 'http://b'}\noutbound: {url: 'http://p'}\nvalidate: {inbound: report}\n",
