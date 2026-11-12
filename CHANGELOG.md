@@ -84,8 +84,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   design and its test set to @sviljus.
 
 ### Added
-- Raw-XML inbound refuses an XML declaration whose `encoding` is not UTF-8
-  (HTTP 400 `unsupported_encoding`), also before `forward`. Docs: the `sha256`
+- XSD validation of raw-XML lanes, in Rust, for inbound messages and outbound requests. The sidecar
+  key `validate:` sets `off`, `report` or `enforce` per direction. A missing key means `enforce`:
+  a message that breaks the XSD gets HTTP 422 `schema_invalid` (the answer lists the element path,
+  the rule code and the line, never a value), and XTR does not call the backend, forward the message
+  or send the request. An XSD construct outside the supported subset stops the boot with the file and
+  the line. `xtr doctor` reports `off` and `report` as WEAK. Existing lanes validate from now on:
+  set `validate: {inbound: off, outbound: off}` to keep the old behavior.
+- Raw-XML inbound refuses an XML declaration whose `encoding` is not UTF-8 or utf8
+  (HTTP 400 `unsupported_encoding`), also before `forward`, and a prolog that is not well-formed
+  (`malformed_xml`). The checks are in the parser (`dom::parse_message`). Docs: the `sha256`
   digest is for integrity and audit, not for duplicate detection.
 - **Raw-XML lanes** (`<name>.xml.yaml` sidecar next to XSD files, no WSDL,
   no SOAP envelope) for peers that exchange bare XML over HTTP(S), e.g.
