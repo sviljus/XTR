@@ -58,6 +58,7 @@ impl Reader<'_> {
             file: file.to_string(),
             component: String::new(),
             construct: construct.into(),
+            line: 0,
         };
         if !self.problems.contains(&p) {
             self.problems.push(p);
@@ -195,6 +196,7 @@ impl<'a> Build<'a> {
             file: self.cur.0.clone(),
             component: self.cur.1.clone(),
             construct: construct.into(),
+            line: 0,
         };
         if !self.problems.contains(&p) {
             self.problems.push(p);
