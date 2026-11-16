@@ -267,11 +267,12 @@ pub fn exposure_error(
     let outbound_like = sum.outbound + dsl_endpoints;
     (sum.inbound > 0 && outbound_like > 0 && !separate_port && !token_set).then(|| {
         format!(
-            "the inbound SOAP lane (/soap-in/) would share one listener with {} \
-             outbound endpoint(s) ({} /soap-out/ lane(s), {} DSL endpoint(s) on \
-             /:group/:service) while XTR_INTER_SERVICE_TOKEN is unset: whoever can \
-             reach /soap-in/ (the SOAP peer network) could make XTR call out with its \
-             own identity. Set `inbound.port` (separate listener for /soap-in/) or \
+            "an inbound lane (/soap-in/ or /xml-in/, incl. `inbound.path` aliases) would \
+             share one listener with {} outbound endpoint(s) ({} /soap-out/ or /xml-out/ \
+             lane(s), {} DSL endpoint(s) on /:group/:service) while \
+             XTR_INTER_SERVICE_TOKEN is unset: whoever can reach the inbound lane (the \
+             peer network) could make XTR call out with its own identity. Set \
+             `inbound.port` (separate listener for the inbound lanes) or \
              XTR_INTER_SERVICE_TOKEN.",
             outbound_like, sum.outbound, dsl_endpoints
         )

@@ -83,6 +83,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   blocked on the raw-XML lane review. All credit for the walker
   design and its test set to @sviljus.
 
+### Added
+- Raw-XML inbound refuses an XML declaration whose `encoding` is not UTF-8
+  (HTTP 400 `unsupported_encoding`), also before `forward`. Docs: the `sha256`
+  digest is for integrity and audit, not for duplicate detection.
+- **Raw-XML lanes** (`<name>.xml.yaml` sidecar next to XSD files, no WSDL,
+  no SOAP envelope) for peers that exchange bare XML over HTTP(S), e.g.
+  the EU ERRU MOVEHUB. Inbound `POST /xml-in/<group>/<name>` (optional
+  `inbound.path` alias): raw XML → XSD-guided JSON → backend, handing
+  the backend the received bytes (`rawXml`) and their SHA-256; the
+  backend's status decides the peer's answer. Outbound
+  `POST /xml-out/<group>/<name>/<message>` (token-gated): JSON → raw XML
+  → peer, with per-message timeout, optional own client certificate and
+  the upstream status returned as data. `messages.X.forward` relays
+  received bytes unchanged to another receiver for staged migrations.
+  Reuses the SOAP lanes' codec and SSRF guard; stateless by design. No
+  XSD validation. Backend 4xx codes reach the peer only when listed in
+  `inbound.relay_statuses` (default 400/409/422), `messages.X.direction`
+  (`in`/`out`/`both`) scopes a message to one side. A `forward` loop
+  guard (`x-xtr-forwarded` request header) makes XTR answer 508
+  `loop_detected` when a message that arrives with this header must be
+  forwarded again. A forwarded message that goes to a backend is
+  accepted. `/xml-in` and `/xml-out` are reserved paths, also without a
+  trailing path. The alias clash check with DSL endpoints runs only on a
+  shared listener. See `book/src/xml-lanes.md`.
+
 ## [0.5.1-rc] - 2026-10-22
 
 Patch release — one upstream-parsing bug fix contributed by
