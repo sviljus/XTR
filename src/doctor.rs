@@ -163,8 +163,15 @@ fn check_xml_lane_validation(cfg: &AppConfig, out: &mut Vec<Finding>) {
             weak.join("\n  ")
         ),
         recovery: Some(
-            "Remove the `validate:` key of the lane, or set the direction to\n\
-             `enforce`. Use `report` only in a test environment, for a limited time."
+            "The sidecar default is `off` — you must opt in per direction:\n\
+             \n  \
+             validate:\n    \
+             inbound: enforce   # or `annotate` for application-level errors\n    \
+             outbound: enforce\n\
+             \n\
+             Use `report` only in a test environment, as the step between\n\
+             `off` and `enforce` while you run the Xerces differential test\n\
+             against your XSD corpus (see book/src/xml-lanes.md)."
                 .into(),
         ),
     });

@@ -60,13 +60,21 @@ Reasons:
 
    ```yaml
    validate:
-     inbound: enforce    # off | report | enforce
+     inbound: enforce    # off | report | enforce (default off)
      outbound: enforce
    ```
 
-   A missing key means `enforce`. `report` logs the errors and does not
-   refuse the message. `xtr doctor` reports `off` and `report` as
-   WEAK. A fourth mode, `annotate`, applies to inbound only (point 5a).
+   **A missing key means `off`.** Validation is opt-in per deployment
+   because the differential test against Apache Xerces (point 7) runs
+   against the operator's own XSD corpus in a manual workflow. "Zero
+   differences" is a per-deployment claim rather than a repo-level
+   invariant, so an XTR upgrade must not silently flip a lane into
+   `enforce` against a validator that has not been Xerces-gated on
+   the operator's schemas. The rollout is **off → report → enforce**
+   (or `annotate`, see point 5a). `report` logs the errors and does
+   not refuse the message. `xtr doctor` reports a served direction
+   with `off` or `report` as WEAK — the WEAK on `off` is the signal
+   that the validator is available but not in use.
 5. Answers: an invalid message gets HTTP 422 `schema_invalid`. An invalid
    outbound request does not go to the peer. An internal validator error gets
    HTTP 500 `validator_failed`; the details go to the log only.
@@ -127,11 +135,14 @@ Reasons:
 
 ## Gate
 
-Before `enforce` is the default in production, a differential test compares
-the validator with Xerces on the ERRU sample messages and on generated invalid
-messages. The test must show zero differences. Xerces runs only in the
-test, not at run time. Until then, use `report` in
-test environments.
+Before a deployment turns a lane to `enforce` (or `annotate`), a differential
+test compares the validator with Xerces on the operator's own XSD corpus and
+on generated invalid messages. The test must show zero differences. Xerces
+runs only in the test, not at run time. The gate is deployment-level, not
+repo-level: the XTR crate cannot know a given operator's corpus, so the
+sidecar default is `off` and every rollout runs the `xsd-oracle` workflow
+(PR #48) against its own schemas and samples before flipping `report` to
+`enforce`.
 
 ## Consequences
 

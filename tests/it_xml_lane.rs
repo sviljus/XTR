@@ -212,9 +212,14 @@ fn xml_post(uri: &str, body: &str) -> Request<Body> {
         .unwrap()
 }
 
+/// Baseline inbound sidecar used by most tests. `validate:
+/// {inbound: enforce}` is explicit because the sidecar default is
+/// `off` (opt-in per deployment, matching the Xerces-gate rollout
+/// in #48) — tests that cover validation behaviour must set the
+/// mode themselves, not rely on the default.
 fn inbound_sidecar(backend: &str) -> String {
     format!(
-        "schemas: [Msg.xsd]\nmessages:\n  Notify_Request: {{}}\n  Notify_Acknowledgement: {{}}\ninbound:\n  backend: {backend}\n  path: /erru/xml\n"
+        "schemas: [Msg.xsd]\nmessages:\n  Notify_Request: {{}}\n  Notify_Acknowledgement: {{}}\ninbound:\n  backend: {backend}\n  path: /erru/xml\nvalidate: {{inbound: enforce}}\n"
     )
 }
 
@@ -352,9 +357,12 @@ async fn inbound_forward_relays_exact_bytes_and_status_to_the_old_system() {
 
 // ----------------------------------------------------------- outbound
 
+/// Baseline outbound sidecar. Same reason as [`inbound_sidecar`]:
+/// explicit `validate: {outbound: enforce}` because the sidecar
+/// default is `off`.
 fn outbound_sidecar(url: &str) -> String {
     format!(
-        "schemas: [Msg.xsd]\nmessages:\n  Notify_Request: {{}}\n  Other_Request:\n    timeout_secs: 3\noutbound:\n  url: {url}\n  timeout_secs: 5\n"
+        "schemas: [Msg.xsd]\nmessages:\n  Notify_Request: {{}}\n  Other_Request:\n    timeout_secs: 3\noutbound:\n  url: {url}\n  timeout_secs: 5\nvalidate: {{outbound: enforce}}\n"
     )
 }
 
@@ -1223,14 +1231,25 @@ async fn inbound_refuses_declarations_that_break_the_declaration_grammar() {
 /// `Notify_Request` without the required `technicalId` attribute.
 const NOTIFY_INVALID: &str = r#"<?xml version="1.0" encoding="UTF-8"?><Notify_Request xmlns="urn:erru"><Header workflowId="w-1"/><Body businessCaseId="SECRET-4711"><TransportManager firstName="Anna"/></Body></Notify_Request>"#;
 
+/// Replace (or add) the `validate:` key in a sidecar. The baseline
+/// helpers `inbound_sidecar` / `outbound_sidecar` already carry an
+/// explicit `validate:` so tests that pin a specific mode would
+/// otherwise emit a duplicate YAML key.
 fn with_validate(sidecar: &str, validate: &str) -> String {
-    format!("{sidecar}validate: {validate}\n")
+    let stripped: String = sidecar
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("validate:"))
+        .map(|l| format!("{l}\n"))
+        .collect();
+    format!("{stripped}validate: {validate}\n")
 }
 
 #[tokio::test]
 async fn inbound_enforce_refuses_a_schema_invalid_message_before_the_backend() {
     let (backend, seen) = spawn_backend().await;
-    // No `validate:` key means `enforce`.
+    // `inbound_sidecar` sets `validate: {inbound: enforce}` explicitly
+    // because the sidecar default is now `off` (opt-in per deployment,
+    // matching the Xerces-gate rollout in #48).
     let env = build(&inbound_sidecar(&backend));
     let (st, body, _) = call(&env.app, xml_post("/xml-in/erru/msg", NOTIFY_INVALID)).await;
     assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
@@ -1278,8 +1297,10 @@ async fn inbound_report_and_off_let_an_invalid_message_through() {
 #[tokio::test]
 async fn inbound_enforce_refuses_an_invalid_message_before_forward() {
     let (target, raw) = spawn_peer(202, "").await;
+    // Default `validate:` is `off` (#47 review): make enforce
+    // explicit so the test exercises the gate it claims to.
     let sidecar = format!(
-        "schemas: [Msg.xsd]\nmessages:\n  Notify_Request: {{forward: '{target}'}}\ninbound: {{}}\n"
+        "schemas: [Msg.xsd]\nmessages:\n  Notify_Request: {{forward: '{target}'}}\ninbound: {{}}\nvalidate: {{inbound: enforce}}\n"
     );
     let env = build(&sidecar);
     let (st, body, _) = call(&env.app, xml_post("/xml-in/erru/msg", NOTIFY_INVALID)).await;
@@ -1373,7 +1394,7 @@ const ANY_XSD: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 </xs:schema>"#;
 
 #[test]
-fn an_unsupported_xsd_construct_refuses_boot_unless_validation_is_off() {
+fn an_unsupported_xsd_construct_refuses_boot_only_when_validation_is_enabled() {
     let base =
         "schemas: [Msg.xsd]\nmessages: {Notify_Request: {}}\ninbound: {backend: 'http://b'}\n";
     let write = |sidecar: &str| {
@@ -1382,18 +1403,70 @@ fn an_unsupported_xsd_construct_refuses_boot_unless_validation_is_off() {
         xsd
     };
     let dsl = TempDir::new().unwrap();
+
+    // Default `validate:` = `off` (opt-in per deployment, matching
+    // the Xerces-gate rollout in #48): a sidecar with no `validate:`
+    // key does NOT exercise the validator, so an unsupported XSD
+    // construct does not refuse boot. This pins the opt-in posture.
     let xsd = write(base);
+    assert!(
+        xmllane::load_all(Some(xsd.path()), &cfg_for(&xsd, &dsl)).is_ok(),
+        "default = off must not exercise the validator"
+    );
+
+    // With `inbound: enforce` the validator loads at boot and the
+    // unsupported construct becomes a loud, locatable failure.
+    let xsd = write(&with_validate(base, "{inbound: enforce}"));
     let e = xmllane::load_all(Some(xsd.path()), &cfg_for(&xsd, &dsl)).unwrap_err();
     assert!(e.contains("xs:any"), "names the construct: {e}");
     assert!(e.contains("Msg.xsd:"), "names the file and the line: {e}");
+
+    // Explicit `off` on both directions is fine even when the
+    // schema is outside the supported subset.
     let xsd = write(&with_validate(base, "{inbound: off, outbound: off}"));
     assert!(xmllane::load_all(Some(xsd.path()), &cfg_for(&xsd, &dsl)).is_ok());
-    // A lane with both directions needs the model while one direction validates.
+
+    // A lane with both directions: if either validates, the model
+    // is needed and the unsupported construct refuses boot.
     let both = "schemas: [Msg.xsd]\nmessages: {Notify_Request: {}}\ninbound: {backend: 'http://b'}\noutbound: {url: 'http://localhost:1/x'}\n";
-    let xsd = write(&with_validate(both, "{inbound: off}"));
+    let xsd = write(&with_validate(both, "{inbound: off, outbound: enforce}"));
     assert!(xmllane::load_all(Some(xsd.path()), &cfg_for(&xsd, &dsl)).is_err());
     let xsd = write(&with_validate(both, "{inbound: off, outbound: off}"));
     assert!(xmllane::load_all(Some(xsd.path()), &cfg_for(&xsd, &dsl)).is_ok());
+}
+
+/// Regression pin for the #47-review change — move `#[default]`
+/// from `Enforce` to `Off` on `ValidateMode`. A future refactor
+/// that silently flips the default back is a security regression
+/// (operator upgrades suddenly start enforcing an un-Xerces-gated
+/// validator against their own XSDs) — this test fails if the
+/// default moves.
+#[test]
+fn validate_mode_default_is_off_on_the_enum_and_on_both_sides_of_the_cfg() {
+    use xtr_on_rust::xmllane::{ValidateCfg, ValidateMode, XmlSidecar};
+
+    // Enum default.
+    assert_eq!(ValidateMode::default(), ValidateMode::Off);
+
+    // Both fields of ValidateCfg inherit the enum default via
+    // `#[serde(default)]`.
+    let cfg = ValidateCfg::default();
+    assert_eq!(cfg.inbound, ValidateMode::Off);
+    assert_eq!(cfg.outbound, ValidateMode::Off);
+
+    // End-to-end YAML path: a sidecar without `validate:` must
+    // parse with both sides `Off`.
+    let yaml = "schemas: [a.xsd]\nmessages: {Msg: {}}\ninbound: {backend: 'http://b'}\n";
+    let sc: XmlSidecar = serde_yaml_ng::from_str(yaml).unwrap();
+    assert_eq!(sc.validate.inbound, ValidateMode::Off);
+    assert_eq!(sc.validate.outbound, ValidateMode::Off);
+
+    // Partial `validate:` — only one direction given — leaves the
+    // other at `Off` (not at the previous `Enforce`).
+    let yaml = "schemas: [a.xsd]\nmessages: {Msg: {}}\ninbound: {backend: 'http://b'}\nvalidate: {inbound: report}\n";
+    let sc: XmlSidecar = serde_yaml_ng::from_str(yaml).unwrap();
+    assert_eq!(sc.validate.inbound, ValidateMode::Report);
+    assert_eq!(sc.validate.outbound, ValidateMode::Off);
 }
 
 // ------------------------------------------------------------ annotate

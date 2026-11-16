@@ -378,7 +378,11 @@ fn xml_lane_with(validate: &str) -> TempDir {
 
 #[test]
 fn doctor_warns_when_a_raw_xml_lane_does_not_enforce_xsd_validation() {
+    // Default is now `off` (#47 review): a sidecar without a
+    // `validate:` key is served but not validating, which is
+    // exactly the posture the WEAK rule is meant to surface.
     for validate in [
+        "",
         "validate: {inbound: report}\n",
         "validate: {inbound: off}\n",
     ] {
@@ -396,9 +400,11 @@ fn doctor_warns_when_a_raw_xml_lane_does_not_enforce_xsd_validation() {
 #[test]
 fn doctor_is_quiet_about_validation_when_the_lane_enforces_it() {
     for validate in [
-        "",
         "validate: {inbound: enforce}\n",
-        "validate: {outbound: off}\n",
+        // Explicit `outbound: off` on an inbound-only lane: only
+        // the inbound direction is served, so there's nothing to
+        // warn about.
+        "validate: {inbound: enforce, outbound: off}\n",
     ] {
         let tmp = xml_lane_with(validate);
         let (_, stdout, _) = run_doctor(tmp.path(), &[]);

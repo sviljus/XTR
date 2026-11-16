@@ -50,21 +50,34 @@ pub struct XmlSidecar {
     pub inbound: Option<XmlInbound>,
     #[serde(default)]
     pub outbound: Option<XmlOutbound>,
-    /// XSD validation per direction. A missing key means `enforce`.
+    /// XSD validation per direction. A missing key means `off` —
+    /// validation is opt-in per deployment because the differential
+    /// gate against Apache Xerces (PR #48) runs against the operator's
+    /// own XSD corpus in a manual workflow, so "zero differences" is a
+    /// per-deployment claim rather than a repo-level invariant. The
+    /// rollout is `off` → `report` (observe, run the Xerces workflow
+    /// against your schemas and samples) → `enforce` or `annotate`.
+    /// `xtr doctor` emits WEAK for `off` / `report` and INFO for
+    /// `annotate` so the current posture is visible on every run.
     #[serde(default)]
     pub validate: ValidateCfg,
 }
 
 /// What XTR does with a message that breaks the XSD.
+///
+/// **Default is `Off`.** Flipping an existing lane to `Report` or
+/// `Enforce` on an upgrade must be an operator action, not a silent
+/// side effect of installing a new XTR version — see the doc comment
+/// on [`XmlSidecar::validate`] for the rollout story.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ValidateMode {
-    /// No validation.
+    /// No validation. Default.
+    #[default]
     Off,
     /// Log and count the violations. Pass the message on.
     Report,
     /// Refuse the message with HTTP 422 `schema_invalid`.
-    #[default]
     Enforce,
     /// Inbound only. Always call the backend and tell it the verdict
     /// (`schemaValid`, `violations`). The backend owns the answer.
@@ -344,8 +357,10 @@ impl XmlService {
             .is_some_and(|m| m.cfg.backend.is_some())
     }
 
-    /// Validation mode of each served direction, for the boot log and
-    /// for `xtr doctor`: `inbound=enforce outbound=report`.
+    /// Validation mode of each served direction, for the boot log
+    /// and for `xtr doctor`. Example: `inbound=enforce outbound=off`
+    /// for a lane with inbound explicitly enforcing and outbound
+    /// riding the `off` default.
     pub fn validate_summary(&self) -> String {
         let v = &self.sidecar.validate;
         let mut parts = Vec::new();
@@ -1232,13 +1247,24 @@ mod validate_tests {
             log_limit_outbound: LogLimit::default(),
             backend_headers: Vec::new(),
         };
+        // Default is `off` on both sides — operators opt in per
+        // direction. The partial-set case below pins that outbound
+        // stays `off` when only `inbound` is named.
         let both = svc(sc(
             "schemas: [a.xsd]\nmessages: {M: {}}\ninbound: {backend: 'http://b'}\noutbound: {url: 'http://p'}\nvalidate: {inbound: report}\n",
         ));
-        assert_eq!(both.validate_summary(), "inbound=report outbound=enforce");
+        assert_eq!(both.validate_summary(), "inbound=report outbound=off");
         let only_in = svc(sc(
             "schemas: [a.xsd]\nmessages: {M: {}}\ninbound: {backend: 'http://b'}\nvalidate: {inbound: off}\n",
         ));
         assert_eq!(only_in.validate_summary(), "inbound=off");
+        // Both-sides enforce for the behavioural-pin direction.
+        let both_on = svc(sc(
+            "schemas: [a.xsd]\nmessages: {M: {}}\ninbound: {backend: 'http://b'}\noutbound: {url: 'http://p'}\nvalidate: {inbound: enforce, outbound: enforce}\n",
+        ));
+        assert_eq!(
+            both_on.validate_summary(),
+            "inbound=enforce outbound=enforce"
+        );
     }
 }

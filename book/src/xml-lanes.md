@@ -92,7 +92,7 @@ outbound:
   content_type: application/xml; charset=utf-8
 
 validate:                    # XSD validation, see "XSD validation"
-  inbound: report            # off | report | enforce (default enforce)
+  inbound: report            # off | report | enforce (default off — opt in per deployment)
   outbound: report           # do not copy enforce to production before "Turning on enforce or annotate"
 ```
 
@@ -266,18 +266,25 @@ Set the mode for each direction in the sidecar:
 
 ```yaml
 validate:
-  inbound: report    # off | report | annotate | enforce (default enforce); annotate: inbound only
-  outbound: report   # a missing key means enforce; see "Rolling out a version with validation"
+  inbound: report    # off | report | annotate | enforce (default off); annotate: inbound only
+  outbound: report   # a missing key means off; see "Rolling out a version with validation"
 ```
 
-A missing key means `enforce`.
+**The default is `off`.** A missing `validate:` key, or a missing
+`inbound` / `outbound` field inside it, leaves that direction at
+`off` — validation is opt-in per deployment, because the differential
+test against Apache Xerces (PR #48, `xsd-oracle` workflow) runs
+against *your* XSD corpus in a manual workflow. "Zero differences"
+is a per-deployment claim, not a repo-level invariant, so an XTR
+upgrade must not silently flip a lane into `enforce` against a
+validator that has not yet been Xerces-gated on your schemas.
 
 | Mode | Behavior |
 |------|----------|
-| `enforce` | XTR refuses a message that breaks the XSD. |
-| `report` | XTR logs the violations and passes the message on. |
+| `off` | XTR does not validate. **Default.** `xtr doctor` reports a served direction with `off` as WEAK. |
+| `report` | XTR logs the violations and passes the message on. Use as the step between `off` and `enforce` while you run the Xerces workflow against your corpus. `xtr doctor` reports `report` as WEAK. |
+| `enforce` | XTR refuses a message that breaks the XSD with HTTP 422. |
 | `annotate` | Inbound only. XTR always calls the backend and tells it the verdict. The backend answers the peer. See "Annotate". |
-| `off` | XTR does not validate. |
 
 `enforce` answers HTTP 422. Use it only where the protocol of the peer
 accepts a 4xx answer. Some protocols need an application-level error
@@ -440,18 +447,27 @@ variable. XTR reads the variable at boot.
 
 ### Rolling out a version with validation
 
-An existing lane validates from this version on, because a missing key
-means `enforce`. Do the steps in this order:
+The sidecar default is `off`: an XTR upgrade does not silently flip
+an existing lane into `enforce` or `report`. Validation is opt in,
+per deployment, because the differential test against Apache Xerces
+runs against *your* XSD corpus in a manual workflow. The rollout is
+**off → report → enforce / annotate**, in that order, per direction:
 
-1. Add `validate: report` for both directions to every raw-XML sidecar.
-   This applies to `.xml.yaml` and `.xml.yml` files.
-2. Run `xtr doctor` of the new version on the sidecar directory. It must
-   list every raw-XML lane with `report`.
-3. Roll out the new version.
-4. Read the logs (see "Logs"). Decide for each violation if the peer or
-   the validator is wrong.
-5. Turn on `enforce` or `annotate` for one lane and one direction at a
-   time. See "Turning on enforce or annotate".
+1. Upgrade XTR. Nothing changes for an existing lane: the missing
+   `validate:` key keeps the direction at `off`.
+2. Run `xtr doctor` on the new version. It lists each served
+   direction without an explicit `enforce` or `annotate` as WEAK
+   (`weak-xml-lane-validation-not-enforced`). That is the signal
+   that the validator is available but not in use.
+3. Add `validate: report` for both directions to every raw-XML
+   sidecar you want to validate. This applies to `.xml.yaml` and
+   `.xml.yml` files.
+4. Restart XTR. The doctor still reports WEAK on `report`; that is
+   expected during the rollout.
+5. Read the logs (see "Logs"). Decide for each violation if the
+   peer or the validator is wrong.
+6. Turn on `enforce` or `annotate` for one lane and one direction
+   at a time. See "Turning on enforce or annotate".
 
 ### Turning on enforce or annotate
 
